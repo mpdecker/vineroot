@@ -1,0 +1,48 @@
+# Dependencies
+node_modules/
+yarn.lock
+package-lock.json
+pnpm-lock.yaml
+bun.lockb
+
+# Build
+dist/
+build/
+.next/
+out/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.iml
+
+# Runtime
+.turbo/
+.cache/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local API uploads (see UPLOAD_ROOT)
+apps/api/uploads/*
+!apps/api/uploads/.gitkeep
+
+# Prisma
+.prisma/
+
+# Testing
+coverage/
+.nyc_output/

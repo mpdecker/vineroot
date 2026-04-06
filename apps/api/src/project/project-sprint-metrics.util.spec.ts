@@ -1,0 +1,147 @@
+import { TaskStatus } from '@prisma/client';
+import {
+  calendarDayToIsoKey,
+  completedCumulativeThroughDayEnd,
+  eachCalendarDayInclusive,
+  endOfCalendarDay,
+  prismaDateFromIsoKey,
+  startOfCalendarDay,
+  storyPointsRemainingAtDayEnd,
+} from './project-sprint-metrics.util';
+
+describe('project-sprint-metrics.util', () => {
+  describe('eachCalendarDayInclusive', () => {
+    it('returns inclusive local calendar days', () => {
+      const start = new Date(2026, 3, 4);
+      const end = new Date(2026, 3, 6);
+      const days = eachCalendarDayInclusive(start, end);
+      expect(days).toHaveLength(3);
+      expect(days[0].getDate()).toBe(4);
+      expect(days[2].getDate()).toBe(6);
+    });
+  });
+
+  describe('calendarDayToIsoKey / prismaDateFromIsoKey', () => {
+    it('round-trips a calendar day key for DB DATE queries', () => {
+      const day = startOfCalendarDay(new Date(2026, 3, 4));
+      const key = calendarDayToIsoKey(day);
+      const d = prismaDateFromIsoKey(key);
+      expect(key).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(d.toISOString().startsWith(key)).toBe(true);
+    });
+  });
+
+  describe('storyPointsRemainingAtDayEnd', () => {
+    const dayEnd = endOfCalendarDay(new Date(2026, 3, 4));
+
+    it('returns 0 for CANCELLED', () => {
+      expect(
+        storyPointsRemainingAtDayEnd(
+          {
+            status: TaskStatus.CANCELLED,
+            storyPoints: 5,
+            completedAt: null,
+            updatedAt: new Date(),
+          },
+          dayEnd,
+        ),
+      ).toBe(0);
+    });
+
+    it('returns 0 for DONE completed on or before day end', () => {
+      const at = new Date(2026, 3, 4, 10, 0, 0);
+      expect(
+        storyPointsRemainingAtDayEnd(
+          {
+            status: TaskStatus.DONE,
+            storyPoints: 3,
+            completedAt: at,
+            updatedAt: at,
+          },
+          dayEnd,
+        ),
+      ).toBe(0);
+    });
+
+    it('returns points for DONE completed after day end', () => {
+      const at = new Date(2026, 3, 5, 10, 0, 0);
+      expect(
+        storyPointsRemainingAtDayEnd(
+          {
+            status: TaskStatus.DONE,
+            storyPoints: 3,
+            completedAt: at,
+            updatedAt: at,
+          },
+          dayEnd,
+        ),
+      ).toBe(3);
+    });
+
+    it('returns full points for non-terminal statuses', () => {
+      expect(
+        storyPointsRemainingAtDayEnd(
+          {
+            status: TaskStatus.IN_PROGRESS,
+            storyPoints: 8,
+            completedAt: null,
+            updatedAt: new Date(),
+          },
+          dayEnd,
+        ),
+      ).toBe(8);
+    });
+  });
+
+  describe('completedCumulativeThroughDayEnd', () => {
+    const sprintStartMs = startOfCalendarDay(new Date(2026, 3, 1)).getTime();
+    const upper = endOfCalendarDay(new Date(2026, 3, 4)).getTime();
+
+    it('sums DONE story points completed within window', () => {
+      const t1 = new Date(2026, 3, 2, 12, 0, 0);
+      const t2 = new Date(2026, 3, 4, 8, 0, 0);
+      const sum = completedCumulativeThroughDayEnd(
+        [
+          {
+            status: TaskStatus.DONE,
+            storyPoints: 2,
+            completedAt: t1,
+            updatedAt: t1,
+          },
+          {
+            status: TaskStatus.DONE,
+            storyPoints: 5,
+            completedAt: t2,
+            updatedAt: t2,
+          },
+          {
+            status: TaskStatus.IN_PROGRESS,
+            storyPoints: 10,
+            completedAt: null,
+            updatedAt: new Date(),
+          },
+        ],
+        sprintStartMs,
+        upper,
+      );
+      expect(sum).toBe(7);
+    });
+
+    it('ignores completions before sprint start', () => {
+      const early = new Date(2026, 2, 28, 12, 0, 0);
+      const sum = completedCumulativeThroughDayEnd(
+        [
+          {
+            status: TaskStatus.DONE,
+            storyPoints: 3,
+            completedAt: early,
+            updatedAt: early,
+          },
+        ],
+        sprintStartMs,
+        upper,
+      );
+      expect(sum).toBe(0);
+    });
+  });
+});
