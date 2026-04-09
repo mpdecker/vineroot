@@ -2,6 +2,7 @@ import type { CSSProperties, ReactNode } from 'react';
 import type { DraggableAttributes, DraggableSyntheticListeners } from '@dnd-kit/core';
 import { Check, MessageCircle, GripVertical } from 'lucide-react';
 import { Task } from '../../types';
+import type { TaskScheduleInsight } from '../../lib/taskScheduleInsight';
 import { summarizeCustomFieldsForList } from '../../lib/formatTaskCustomFields';
 import { Badge, Avatar, Tooltip } from '../ui';
 import { formatDistanceToNow, isPast, isToday } from 'date-fns';
@@ -26,6 +27,8 @@ interface TaskRowProps {
   sortable?: TaskRowSortableProps;
   /** Extra control before the grip (e.g. expand/collapse subtasks). */
   leading?: ReactNode;
+  /** When CPM data is available, compact schedule badges after the title. */
+  scheduleInsight?: TaskScheduleInsight;
 }
 
 export function TaskRow({
@@ -36,6 +39,7 @@ export function TaskRow({
   onDragStart,
   sortable,
   leading,
+  scheduleInsight,
 }: TaskRowProps) {
   const customFieldLines = summarizeCustomFieldsForList(task.customFields, 2);
   const isDone = task.status === 'DONE';
@@ -82,16 +86,43 @@ export function TaskRow({
         {isDone && <Check className="w-3 h-3 text-white stroke-[3]" />}
       </button>
 
-      {/* Title */}
-      <button
-        onClick={() => onSelect(task.id)}
-        className={clsx(
-          'flex-1 text-left text-sm truncate',
-          isDone && 'text-gray-400 line-through'
-        )}
-      >
-        {task.title}
-      </button>
+      {/* Title + schedule chips */}
+      <div className="flex-1 min-w-0 flex items-center gap-2">
+        <button
+          onClick={() => onSelect(task.id)}
+          className={clsx(
+            'text-left text-sm truncate min-w-0',
+            isDone && 'text-gray-400 line-through',
+          )}
+        >
+          {task.title}
+        </button>
+        {scheduleInsight ? (
+          <div className="flex items-center gap-1 shrink-0">
+            {scheduleInsight.onCriticalPath ? (
+              <span
+                className="text-[10px] font-medium text-amber-900 bg-amber-50 rounded px-1 py-0.5 border border-amber-200/80"
+                title="On critical path"
+              >
+                CP
+              </span>
+            ) : null}
+            {scheduleInsight.slackLabel ? (
+              <span
+                className="text-[10px] text-gray-600 bg-gray-100 rounded px-1 py-0.5 tabular-nums"
+                title="Total slack"
+              >
+                {scheduleInsight.slackLabel}
+              </span>
+            ) : null}
+            {scheduleInsight.deadlineBreached ? (
+              <span className="text-[10px] font-medium text-red-700 bg-red-50 rounded px-1 py-0.5">
+                Deadline
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
 
       {/* Assignees */}
       {task.assignees && task.assignees.length > 0 && (

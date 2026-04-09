@@ -132,6 +132,50 @@ export const DependencyType = {
 } as const;
 export type DependencyType = (typeof DependencyType)[keyof typeof DependencyType];
 
+/** CPM link type (Microsoft Project). */
+export const ScheduleLinkType = {
+  FS: "FS",
+  SS: "SS",
+  FF: "FF",
+  SF: "SF",
+} as const;
+export type ScheduleLinkType =
+  (typeof ScheduleLinkType)[keyof typeof ScheduleLinkType];
+
+export const TaskConstraintType = {
+  ASAP: "ASAP",
+  ALAP: "ALAP",
+  SNET: "SNET",
+  SNLT: "SNLT",
+  MSO: "MSO",
+  MFO: "MFO",
+} as const;
+export type TaskConstraintType =
+  (typeof TaskConstraintType)[keyof typeof TaskConstraintType];
+
+export const TaskScheduleMode = {
+  MANUAL: "MANUAL",
+  FIXED_UNITS: "FIXED_UNITS",
+  FIXED_WORK: "FIXED_WORK",
+  FIXED_DURATION: "FIXED_DURATION",
+} as const;
+export type TaskScheduleMode =
+  (typeof TaskScheduleMode)[keyof typeof TaskScheduleMode];
+
+/** Work spread in timephased API (Phase 4); does not affect CPM dates. */
+export const TaskWorkContour = {
+  FLAT: "FLAT",
+  FRONT_LOADED: "FRONT_LOADED",
+  BACK_LOADED: "BACK_LOADED",
+  BELL: "BELL",
+  DOUBLE_PEAK: "DOUBLE_PEAK",
+  TURTLE: "TURTLE",
+  EARLY_PEAK: "EARLY_PEAK",
+  LATE_PEAK: "LATE_PEAK",
+} as const;
+export type TaskWorkContour =
+  (typeof TaskWorkContour)[keyof typeof TaskWorkContour];
+
 export const TaskWorkItemType = {
   TASK: "TASK",
   STORY: "STORY",
@@ -162,6 +206,23 @@ export const CustomFieldType = {
 } as const;
 export type CustomFieldType =
   (typeof CustomFieldType)[keyof typeof CustomFieldType];
+
+export const CustomFieldComputedKind = {
+  NONE: "NONE",
+  SUBTASK_ROLLUP_NUMBER: "SUBTASK_ROLLUP_NUMBER",
+} as const;
+export type CustomFieldComputedKind =
+  (typeof CustomFieldComputedKind)[keyof typeof CustomFieldComputedKind];
+
+export const CustomFieldRollupAggregation = {
+  SUM: "SUM",
+  AVG: "AVG",
+  MIN: "MIN",
+  MAX: "MAX",
+  COUNT: "COUNT",
+} as const;
+export type CustomFieldRollupAggregation =
+  (typeof CustomFieldRollupAggregation)[keyof typeof CustomFieldRollupAggregation];
 
 export const GoalMetricType = {
   PERCENT: "PERCENT",
@@ -287,6 +348,11 @@ export interface UserDto {
   isAgent: boolean;
   agentTier?: ActorTier;
   timezone: string;
+  /** Optional personal work calendar (e.g. for leveling); must be in a workspace you belong to. */
+  workCalendarId?: string | null;
+  /** Default standard rate per hour for cost / EVM when assigned to tasks. */
+  resourceStandardRatePerHour?: number | null;
+  resourceOvertimeRatePerHour?: number | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -311,6 +377,19 @@ export interface AuthResponse {
 
 export interface RefreshTokenRequest {
   refreshToken: string;
+}
+
+export interface UpdateProfileRequest {
+  displayName?: string;
+  timezone?: string;
+  workCalendarId?: string | null;
+  resourceStandardRatePerHour?: number | null;
+  resourceOvertimeRatePerHour?: number | null;
+}
+
+export interface ChangePasswordRequest {
+  currentPassword: string;
+  newPassword: string;
 }
 
 // ─── WORKSPACE ────────────────────────────────────────────────────────────────
@@ -461,6 +540,8 @@ export interface ProjectDto {
   sections?: SectionDto[];
   /** Time-boxed iterations (Scrum); empty when none created. */
   sprints?: SprintDto[];
+  workCalendarId?: string | null;
+  defaultManualSchedule?: boolean;
 }
 
 export interface SprintDto {
@@ -493,7 +574,7 @@ export interface UpdateSprintRequest {
   sortOrder?: number;
 }
 
-/** GET …/projects/:projectId/sprints/:sprintId/burndown — MVP from current tasks + completedAt. */
+/** GET …/projects/:projectId/sprints/:sprintId/burndown — MVP from current tasks + completedAt. Optional query `from` & `to` (YYYY-MM-DD) clamp to sprint; `ideal` uses full-sprint day index. */
 export interface SprintBurndownDayDto {
   /** ISO calendar date (YYYY-MM-DD). */
   date: string;
@@ -583,11 +664,26 @@ export interface ProjectSavedViewConfigDto {
     | "burndown"
     | "flow"
     | "workload"
-    | "activity";
+    | "activity"
+    | "timephased"
+    | "network";
   /** Workload tab: week column count (4–26). */
   workloadWeeks?: number;
   /** Workload tab: optional YYYY-MM-DD; grid aligns to Monday of that week. */
   workloadFrom?: string;
+  /** List/board backlog views: schedule row filter from `GET …/schedule/critical-path`. */
+  listScheduleFilter?: "all" | "critical" | "slack" | "deadline";
+  /** List/board backlog views: sort order using schedule fields. */
+  listScheduleSort?:
+    | "none"
+    | "critical_first"
+    | "slack_desc"
+    | "deadline_breach_first"
+    | "constraint_type";
+  /** Timephased tab: mirrors `?granularity=&basis=&grid=` query params. */
+  timephasedGranularity?: "week" | "day";
+  timephasedBasis?: "calendar" | "working";
+  timephasedGridMode?: "list" | "task_usage" | "resource_usage";
 }
 
 export interface ProjectSavedViewDto {
@@ -760,6 +856,8 @@ export interface UpdateProjectRequest {
   workspaceIds?: string[];
   teamId?: string | null;
   kanbanWipEnforcement?: KanbanWipEnforcement;
+  workCalendarId?: string | null;
+  defaultManualSchedule?: boolean;
 }
 
 // ─── SECTION ──────────────────────────────────────────────────────────────────
@@ -813,6 +911,12 @@ export interface TaskDependencyDto {
   dependentId: string;
   blockingId: string;
   type: DependencyType;
+  /** CPM link type; FS default. */
+  linkType?: ScheduleLinkType;
+  /** Working-day lag when project uses WorkCalendar; else calendar-day compatible. */
+  lagDays: number;
+  /** When true, lag counts calendar days (MSP elapsed lag). */
+  lagIsElapsed?: boolean;
   createdAt: Date;
   /** Present when this row is “dependent waits on blocking” (blocking task summary). */
   blockingTask?: TaskSummaryDto;
@@ -889,9 +993,43 @@ export interface TaskDto {
   recurrenceUntil?: Date;
   isTemplate: boolean;
   isMilestone?: boolean;
+  /** When false, schedule recalculation may update start/due dates. */
+  isManuallyScheduled?: boolean;
+  constraintType?: TaskConstraintType;
+  constraintDate?: Date | null;
+  deadlineDate?: Date | null;
+  durationWorkingMinutes?: number | null;
+  workMinutes?: number | null;
+  scheduleMode?: TaskScheduleMode;
+  /** Optional task work calendar (workspace calendar id). */
+  workCalendarId?: string | null;
+  effortDriven?: boolean;
+  isSummaryRollup?: boolean;
+  /** 0–1000; lower = delayed first when leveling resources (MSP-style). Default 500. */
+  levelingPriority?: number;
+  /** Accumulated working-day delay applied by resource leveling. */
+  levelingDelayWorkingDays?: number;
+  /** Hint for split-aware leveling (Phase 4); affects ordering when enabled on level request. */
+  levelingCanSplit?: boolean;
+  /** WBS-style outline e.g. "1.2.3" when returned from project-scoped APIs. */
+  wbsOutlineNumber?: string | null;
+  /** 0–100 */
+  percentComplete?: number;
+  fixedCost?: number | null;
+  /** When set, EVM actual cost (AC) for this task; otherwise AC tracks EV. */
+  actualCost?: number | null;
+  /** Overtime labor minutes (actuals); labor BAC uses assignee OT rates on this share. */
+  overtimeWorkMinutes?: number | null;
+  /** Budget / cap line: excluded from operating EVM totals; see GET …/schedule/evm `budget` rollup. */
+  isBudgetTask?: boolean;
+  /** Optional split segments for timeline (Phase 7). */
+  scheduleSegments?: TaskScheduleSegmentDto[] | null;
+  /** Timephased work distribution when no segments (Phase 4). */
+  workContour?: TaskWorkContour;
   createdAt: Date;
   updatedAt: Date;
   assignees?: TaskAssigneeDto[];
+  genericResourceAssignments?: TaskGenericResourceAssignmentDto[];
   subtasks?: TaskDto[];
   tags?: TagDto[];
   customFields?: CustomFieldValueDto[];
@@ -910,8 +1048,42 @@ export interface TaskAssigneeDto {
   id: string;
   taskId: string;
   userId: string;
+  /** 1–100 allocation % for leveling. */
+  unitsPercent?: number;
+  /** Assignment work (minutes); when set, drives cost/EVM for this row instead of task work × units. */
+  workMinutes?: number | null;
+  /** One-time per-assignment fee added to task budget (e.g. per-use). */
+  costPerUse?: number | null;
   user: UserDto;
   assignedAt: Date;
+}
+
+export interface GenericResourceDto {
+  id: string;
+  workspaceId: string;
+  name: string;
+  maxUnitsPercent: number;
+  /** Optional hourly rate for cost / EVM when assigned to tasks with work. */
+  standardRatePerHour?: number | null;
+  /** Optional workspace work calendar; overload uses min(project, resource) working minutes. */
+  workCalendarId?: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** Workspace generic resource row attached to a task (equipment / named capacity). */
+export interface TaskGenericResourceAssignmentDto {
+  id: string;
+  taskId: string;
+  genericResourceId: string;
+  unitsPercent: number;
+  /** One-time per-assignment fee added to task budget. */
+  costPerUse?: number | null;
+  assignedAt: Date;
+  genericResource: Pick<
+    GenericResourceDto,
+    'id' | 'name' | 'maxUnitsPercent' | 'standardRatePerHour'
+  >;
 }
 
 export interface CreateTaskRequest {
@@ -944,6 +1116,27 @@ export interface CreateTaskRequest {
   isMilestone?: boolean;
   /** Only when `sprintId` is unset; lower = higher in backlog ordering. */
   backlogRank?: number | null;
+  isManuallyScheduled?: boolean;
+  constraintType?: TaskConstraintType;
+  constraintDate?: Date | null;
+  deadlineDate?: Date | null;
+  durationWorkingMinutes?: number | null;
+  workMinutes?: number | null;
+  scheduleMode?: TaskScheduleMode;
+  workCalendarId?: string | null;
+  effortDriven?: boolean;
+  isSummaryRollup?: boolean;
+  /** 0–1000 MSP-style leveling priority; default 500. */
+  levelingPriority?: number;
+  /** When true, split-friendly tasks are deferred last when “split-capable last” leveling is on. */
+  levelingCanSplit?: boolean;
+  percentComplete?: number;
+  fixedCost?: number | null;
+  actualCost?: number | null;
+  overtimeWorkMinutes?: number | null;
+  isBudgetTask?: boolean;
+  scheduleSegments?: TaskScheduleSegmentDto[] | null;
+  workContour?: TaskWorkContour;
 }
 
 export interface UpdateTaskRequest {
@@ -984,6 +1177,28 @@ export interface UpdateTaskRequest {
   epicTaskId?: string | null;
   /** Omit unchanged; `null` clears. Ignored while task has a sprint (rank is cleared on sprint assign). */
   backlogRank?: number | null;
+  isManuallyScheduled?: boolean;
+  constraintType?: TaskConstraintType;
+  constraintDate?: Date | null;
+  deadlineDate?: Date | null;
+  durationWorkingMinutes?: number | null;
+  workMinutes?: number | null;
+  scheduleMode?: TaskScheduleMode;
+  workCalendarId?: string | null;
+  effortDriven?: boolean;
+  isSummaryRollup?: boolean;
+  /** 0–1000; omit unchanged. */
+  levelingPriority?: number;
+  levelingCanSplit?: boolean;
+  percentComplete?: number;
+  fixedCost?: number | null;
+  actualCost?: number | null;
+  /** Omit unchanged; `null` clears overtime minutes. */
+  overtimeWorkMinutes?: number | null;
+  isBudgetTask?: boolean;
+  /** Omit unchanged; `null` clears split segments. */
+  scheduleSegments?: TaskScheduleSegmentDto[] | null;
+  workContour?: TaskWorkContour;
 }
 
 /** POST /tasks/:id/duplicate */
@@ -1065,6 +1280,473 @@ export interface SearchResponseDto {
 export interface AddTaskDependencyRequest {
   blockingTaskId: string;
   type?: DependencyType;
+  /** CPM link type (default FS). */
+  linkType?: ScheduleLinkType;
+  /** Optional lag in whole days (default 0). Negative = lead. */
+  lagDays?: number;
+  /** Elapsed (calendar-day) lag in successor time zone vs working-day lag. */
+  lagIsElapsed?: boolean;
+}
+
+export interface UpdateTaskDependencyLagRequest {
+  lagDays: number;
+}
+
+export interface UpdateTaskDependencyScheduleRequest {
+  lagDays?: number;
+  linkType?: ScheduleLinkType;
+  lagIsElapsed?: boolean;
+}
+
+export interface WorkCalendarDto {
+  id: string;
+  workspaceId: string;
+  name: string;
+  timeZone: string;
+  weeklyPattern: Record<string, number>;
+  exceptions: Array<{ date: string; workingMinutes: number }>;
+  isDefault: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface CreateWorkCalendarRequest {
+  name: string;
+  timeZone?: string;
+  weeklyPattern?: Record<string, number>;
+  exceptions?: Array<{ date: string; workingMinutes: number }>;
+  isDefault?: boolean;
+}
+
+export interface UpdateWorkCalendarRequest {
+  name?: string;
+  timeZone?: string;
+  weeklyPattern?: Record<string, number>;
+  exceptions?: Array<{ date: string; workingMinutes: number }>;
+  isDefault?: boolean;
+}
+
+export interface CreateGenericResourceRequest {
+  name: string;
+  /** Default 100. Use above 100 for pooled capacity (e.g. two machines). */
+  maxUnitsPercent?: number;
+  standardRatePerHour?: number | null;
+  /** Workspace work calendar id for resource availability (optional). */
+  workCalendarId?: string | null;
+}
+
+export interface UpdateGenericResourceRequest {
+  name?: string;
+  maxUnitsPercent?: number;
+  standardRatePerHour?: number | null;
+  /** Omit unchanged; null clears resource calendar. */
+  workCalendarId?: string | null;
+}
+
+export interface AddTaskGenericResourceAssignmentRequest {
+  genericResourceId: string;
+  unitsPercent?: number;
+  /** Optional one-time fee for this assignment row. */
+  costPerUse?: number | null;
+}
+
+export interface PatchTaskGenericResourceAssignmentRequest {
+  /** Omit to leave units unchanged. */
+  unitsPercent?: number;
+  /** Omit = unchanged; null clears per-use cost. */
+  costPerUse?: number | null;
+}
+
+export interface AddTaskAssigneeRequest {
+  userId: string;
+  /** 1–100 default 100; allocation % for workload and leveling. */
+  unitsPercent?: number;
+  /** Optional assignment work (minutes). */
+  workMinutes?: number | null;
+  /** One-time fee for this assignment row. */
+  costPerUse?: number | null;
+}
+
+export interface PatchTaskAssigneeRequest {
+  unitsPercent?: number;
+  /** Omit = unchanged; null clears assignment work override. */
+  workMinutes?: number | null;
+  /** Omit = unchanged; null clears per-use cost. */
+  costPerUse?: number | null;
+}
+
+export interface ScheduleProgramDto {
+  id: string;
+  workspaceId: string;
+  name: string;
+  createdAt: Date;
+  updatedAt: Date;
+  projectIds?: string[];
+}
+
+export interface CreateScheduleProgramRequest {
+  name: string;
+}
+
+export interface AddProjectToScheduleProgramRequest {
+  projectId: string;
+}
+
+/** Per-project row for GET …/schedule-programs/:id/schedule-rollup (program / master schedule). */
+export interface ScheduleProgramRollupProjectRowDto {
+  projectId: string;
+  projectName: string;
+  /** Earliest task or project start in scope. */
+  earliestStart: string | null;
+  /** Latest task or project finish in scope. */
+  latestFinish: string | null;
+  criticalTaskCount: number;
+  criticalTaskIds: string[];
+}
+
+export interface ScheduleProgramRollupDto {
+  programId: string;
+  projects: ScheduleProgramRollupProjectRowDto[];
+  /** Min of per-project earliest starts (ISO). */
+  programEarliestStart: string | null;
+  /** Max of per-project latest finishes (ISO). */
+  programLatestFinish: string | null;
+}
+
+export interface TaskScheduleResultDto {
+  taskId: string;
+  startDate: string | null;
+  dueDate: string | null;
+  earlyStartDay: string | null;
+  earlyFinishDay: string | null;
+  totalSlackDays: number | null;
+  /** Total slack in whole working days on the task calendar. */
+  totalSlackWorkingDays?: number | null;
+  /** True when scheduled early finish is after deadlineDate. */
+  deadlineViolated?: boolean;
+}
+
+export interface ScheduleEngineDiagnosticDto {
+  taskId: string;
+  code: string;
+  message: string;
+}
+
+export interface ScheduleDrivingEdgeDto {
+  fromTaskId: string;
+  toTaskId: string;
+}
+
+export interface ProjectCriticalPathDto {
+  projectId: string;
+  criticalTaskIds: string[];
+  tasks: TaskScheduleResultDto[];
+  /** Constraint / deadline issues detected during the last solve (recalculate). */
+  diagnostics?: ScheduleEngineDiagnosticDto[];
+  /**
+   * Predecessor links that set early start (tight on forward pass), for timeline/network UX.
+   * Empty when the solver did not produce a match (e.g. ALAP-only drivers).
+   */
+  drivingEdges?: ScheduleDrivingEdgeDto[];
+}
+
+/** MS Project–style multi-baseline: valid `baselineIndex` values are `0`…`SCHEDULE_BASELINE_INDEX_MAX` inclusive. */
+export const SCHEDULE_BASELINE_INDEX_MAX = 10;
+
+/** Split task / work-contour segment (display; CPM uses single start/due unless extended later). */
+export interface TaskScheduleSegmentDto {
+  start: string;
+  end: string;
+  workMinutes?: number | null;
+}
+
+/** PERT / dependency network for schedule view (all project tasks with links). */
+export interface ProjectScheduleNetworkNodeDto {
+  id: string;
+  title: string;
+}
+
+export interface ProjectScheduleNetworkEdgeDto {
+  fromTaskId: string;
+  toTaskId: string;
+  linkType: string;
+  lagDays: number;
+  lagIsElapsed?: boolean;
+  /** Present when client merges network with `drivingEdges` from critical-path (same ids). */
+  driving?: boolean;
+}
+
+export interface ProjectScheduleNetworkDto {
+  projectId: string;
+  nodes: ProjectScheduleNetworkNodeDto[];
+  edges: ProjectScheduleNetworkEdgeDto[];
+}
+
+/** One task’s work (and optional cost) in a time bucket for timephased grid. */
+export interface ProjectScheduleTimephasedCellDto {
+  taskId: string;
+  taskTitle: string;
+  periodStart: string;
+  periodEnd: string;
+  workMinutes: number;
+  cost: number | null;
+}
+
+export type ScheduleTimephasedBasis = "calendar" | "working";
+
+/** One resource’s work/cost in a period (Resource Usage grid); split from tasks by assignment units. */
+export interface ProjectScheduleTimephasedResourceCellDto {
+  resourceKey: string;
+  resourceLabel: string;
+  periodStart: string;
+  periodEnd: string;
+  workMinutes: number;
+  cost: number | null;
+}
+
+export interface ProjectScheduleTimephasedDto {
+  projectId: string;
+  granularity: "week" | "day";
+  /** Slot model for spreading work: UTC calendar days vs project working calendar minutes. */
+  basis: ScheduleTimephasedBasis;
+  cells: ProjectScheduleTimephasedCellDto[];
+  /** Per-assignee / generic resource buckets (same periods as `cells`). */
+  resourceCells: ProjectScheduleTimephasedResourceCellDto[];
+}
+
+export interface TaskBaselineRowDto {
+  taskId: string;
+  baselineIndex: number;
+  baselineStart: string | null;
+  baselineFinish: string | null;
+  baselineWorkMinutes: number | null;
+  baselineCost: number | null;
+  /** When this baseline snapshot was last saved (upsert time). */
+  savedAt: string | null;
+}
+
+/** Current schedule vs saved baseline (calendar-day and work/cost deltas). */
+export interface TaskBaselineCompareRowDto {
+  taskId: string;
+  baselineIndex: number;
+  baselineStart: string | null;
+  baselineFinish: string | null;
+  baselineWorkMinutes: number | null;
+  baselineCost: number | null;
+  currentStart: string | null;
+  currentFinish: string | null;
+  currentWorkMinutes: number | null;
+  currentCost: number | null;
+  /** Calendar days: current start minus baseline start (positive = later). */
+  startVarianceDays: number | null;
+  /** Calendar days: current finish minus baseline finish. */
+  finishVarianceDays: number | null;
+  /** Working days slip for start vs baseline (project calendar); null if no calendar or dates. */
+  startVarianceWorkingDays: number | null;
+  /** Working days slip for finish vs baseline (project calendar). */
+  finishVarianceWorkingDays: number | null;
+  /** Current work minus baseline work (minutes). */
+  workVarianceMinutes: number | null;
+  /** Current cost minus baseline cost (same currency as rates/fixed cost). */
+  costVariance: number | null;
+  /** Last time this baseline slot was saved for this task. */
+  savedAt: string | null;
+}
+
+/** Rolled-up variance stats for a project baseline slot. */
+export interface ProjectBaselineSummaryDto {
+  projectId: string;
+  baselineIndex: number;
+  /** Non-deleted, non-template tasks in the project. */
+  projectTaskCount: number;
+  /** Tasks that have a row for this baseline index. */
+  tasksWithBaselineCount: number;
+  finishLateCount: number;
+  finishEarlyCount: number;
+  finishOnTimeCount: number;
+  /** Among rows with a numeric finish variance; null if none. */
+  avgFinishVarianceDays: number | null;
+  /** Sum of finish variances where defined (can be negative overall). */
+  sumFinishVarianceDays: number | null;
+  /** Mean finish working-day variance when project calendar applies. */
+  avgFinishVarianceWorkingDays: number | null;
+  /** Sum of finish working-day variances where defined. */
+  sumFinishVarianceWorkingDays: number | null;
+  /** Sum of work variances where both sides defined. */
+  sumWorkVarianceMinutes: number | null;
+  /** Sum of cost variances where both sides defined. */
+  sumCostVariance: number | null;
+  /** Largest finish slip (positive variance); null if none late. */
+  maxFinishSlipDays: number | null;
+  /** Largest finish slip in working days (positive only). */
+  maxFinishSlipWorkingDays: number | null;
+  /** Most recent baseline upsert in this slot for the project. */
+  latestBaselineSavedAt: string | null;
+}
+
+/** Body for POST …/schedule/level. */
+export interface ProjectLevelRequest {
+  /** Level tasks in this project only, or across the whole schedule program (shared resources). */
+  scope?: 'project' | 'program';
+  /**
+   * When true (default), manually scheduled tasks are not shifted.
+   * When false, leveling may move manual tasks (same working-day step rules).
+   */
+  preserveManuallyScheduled?: boolean;
+  /**
+   * When true, reset `levelingDelayWorkingDays` to 0 on all tasks in scope before leveling runs.
+   * MSP-style “clear leveling values” for delay counters (does not restore original dates).
+   */
+  clearLevelingDelays?: boolean;
+  /**
+   * When true, tasks marked `levelingCanSplit` are sorted to be delayed **after** non-splittable
+   * tasks (tie-break after priority and sort order). Whole-task delay only until split leveling ships.
+   */
+  deferSplitCapableTasksLast?: boolean;
+}
+
+/** Result of POST …/schedule/level. */
+export interface ProjectLevelResultDto {
+  shiftedTaskIds: string[];
+  stoppedReason: 'resolved' | 'no_slack' | 'max_passes';
+  remainingOverallocations: number;
+  /** Echo of request scope when provided. */
+  scope?: 'project' | 'program';
+  /** Tasks whose leveling delay counter was cleared when `clearLevelingDelays` was true. */
+  clearedLevelingDelaysTaskCount?: number;
+}
+
+/** Query for GET …/schedule/overallocations. */
+export interface ScheduleOverallocationsQueryDto {
+  /** `week` (default) or `day` buckets. */
+  granularity?: 'week' | 'day';
+  /** Inclusive YYYY-MM-DD filter in focal project calendar TZ (or workspace default / UTC). */
+  from?: string;
+  to?: string;
+  /** When `program`, merge overloads across all projects in the focal project’s schedule program. */
+  scope?: 'project' | 'program';
+  limit?: number;
+  offset?: number;
+}
+
+export interface OverallocationBucketDto {
+  /** Human assignee vs workspace generic resource. */
+  resourceKind: 'user' | 'generic_resource';
+  /**
+   * Bucket granularity; when omitted, treat as `week` for backward compatibility.
+   */
+  granularity?: 'week' | 'day';
+  /**
+   * Start of bucket: Monday YYYY-MM-DD for `week`, or calendar day for `day`
+   * (focal project work-calendar time zone when scope is project).
+   */
+  periodStart: string;
+  /** Monday week start when `granularity === 'week'`; same as `periodStart` in that case. */
+  weekStart: string;
+  /** Sum of available working minutes in the bucket (intersection of project + resource calendars for users). */
+  capacityMinutes: number;
+  /** Sum of allocated load minutes (units% × per-day capacity). */
+  allocatedMinutes: number;
+  allocatedPercent: number;
+  /** Effective capacity as percent of bucket minutes (typically 100 when using minute-based overload). */
+  capacityPercent: number;
+  taskIds: string[];
+  /** When scope=program, projects contributing to this bucket. */
+  projectIds?: string[];
+  /** Present when resourceKind === 'user'. */
+  userId?: string;
+  /** Present when resourceKind === 'generic_resource'. */
+  genericResourceId?: string;
+  genericResourceName?: string;
+}
+
+/** Per-task EVM roll-up (only tasks with positive BAC). */
+export interface TaskEvmRowDto {
+  taskId: string;
+  title: string;
+  bac: number;
+  pv: number;
+  ev: number;
+  ac: number;
+  spi: number | null;
+  cpi: number | null;
+  eac: number | null;
+  /** True when task is a budget / cap line (same row also rolls into `budget` summary when present). */
+  isBudgetTask?: boolean;
+}
+
+/** How earned value (EV) is derived from progress (Phase 3 / C-05). */
+export type EvmEarnedValueBasis = 'PERCENT_COMPLETE' | 'WORK_VS_BASELINE';
+
+/**
+ * Planned value (PV) model. `BASELINE_DURATION_LINEAR` spreads BAC linearly on baseline **calendar** elapsed time.
+ * `WORK_SCHEDULE_LINEAR` splits BAC into labor vs non-labor using current cost shape: non-labor (fixed + per-use)
+ * still uses calendar time; **labor** uses **working minutes** elapsed along the project calendar between baseline dates.
+ */
+export type EvmPvModel = 'BASELINE_DURATION_LINEAR' | 'WORK_SCHEDULE_LINEAR';
+
+/** Query options for GET …/schedule/evm (Phase 3). */
+export interface ScheduleEvmQueryOptions {
+  /** Baseline index 0–10 for BAC dates, baseline cost, and baseline work (EV/PV modes). Default 0. */
+  baselineIndex?: number;
+  earnedValueBasis?: EvmEarnedValueBasis;
+  pvModel?: EvmPvModel;
+}
+
+/** Budget-task-only EVM bucket (tasks with `isBudgetTask`). */
+export interface ProjectEvmBudgetRollupDto {
+  bac: number;
+  pv: number;
+  ev: number;
+  ac: number;
+  spi: number | null;
+  cpi: number | null;
+  eac: number | null;
+}
+
+export interface ProjectEvmSummaryDto {
+  projectId: string;
+  /** Baseline index used for this response. */
+  baselineIndex: number;
+  earnedValueBasis: EvmEarnedValueBasis;
+  pvModel: EvmPvModel;
+  /** Operating schedule: excludes `isBudgetTask` rows. */
+  bac: number;
+  pv: number;
+  ev: number;
+  ac: number;
+  spi: number | null;
+  cpi: number | null;
+  eac: number | null;
+  /** Populated when the project has at least one budget task with positive BAC. */
+  budget?: ProjectEvmBudgetRollupDto;
+  /** Omitted when requested with tasks=0 on the API. */
+  tasks?: TaskEvmRowDto[];
+}
+
+/** Ledger line for task actual cost (Phase 3 / C-04). */
+export interface TaskCostEntryDto {
+  id: string;
+  taskId: string;
+  amount: number;
+  description?: string | null;
+  entryDate: string;
+  createdAt: string;
+  createdById?: string | null;
+}
+
+export interface CreateTaskCostEntryRequest {
+  amount: number;
+  description?: string;
+  /** ISO datetime; defaults to now. */
+  entryDate?: string;
+}
+
+export interface UpdateTaskCostEntryRequest {
+  amount?: number;
+  /** Pass `null` to clear description. */
+  description?: string | null;
+  entryDate?: string;
 }
 
 export interface CreateTaskAttachmentRequest {
@@ -1134,6 +1816,13 @@ export interface CustomFieldDefinitionDto {
   type: CustomFieldType;
   options?: Record<string, any>;
   isRequired: boolean;
+  description?: string | null;
+  defaultValue?: Record<string, any> | null;
+  computedKind: CustomFieldComputedKind;
+  rollupSourceFieldId?: string | null;
+  rollupAggregation?: CustomFieldRollupAggregation | null;
+  /** True when values are server-computed (read-only for clients). */
+  isComputed?: boolean;
   createdAt: Date;
 }
 
@@ -1150,6 +1839,19 @@ export interface CreateCustomFieldRequest {
   type: CustomFieldType;
   options?: Record<string, any>;
   isRequired?: boolean;
+  description?: string;
+  defaultValue?: Record<string, any>;
+  computedKind?: CustomFieldComputedKind;
+  rollupSourceFieldId?: string;
+  rollupAggregation?: CustomFieldRollupAggregation;
+}
+
+export interface UpdateCustomFieldRequest {
+  name?: string;
+  options?: Record<string, any>;
+  isRequired?: boolean;
+  description?: string | null;
+  defaultValue?: Record<string, any> | null;
 }
 
 export interface SetCustomFieldValueRequest {
@@ -1216,6 +1918,35 @@ export interface GoalDto {
   owner?: UserDto;
 }
 
+/** Declarative metric: server computes `current` from tasks / custom fields. */
+export type GoalMetricDefinition =
+  | {
+      kind: 'TASK_COUNT';
+      /** Limit to one project (must be linked to the goal's workspace). */
+      projectId?: string;
+      statuses?: string[];
+      /**
+       * Optional time window. When set, compares `completedAt` if all statuses are DONE,
+       * otherwise `createdAt` (e.g. backlog created this quarter).
+       */
+      period?: {
+        preset?: 'CURRENT_QUARTER' | 'CURRENT_MONTH' | 'CURRENT_YEAR' | 'RANGE';
+        from?: string;
+        to?: string;
+      };
+    }
+  | {
+      kind: 'CUSTOM_FIELD_SUM';
+      fieldId: string;
+      projectId?: string;
+      aggregate: 'sum';
+    }
+  | {
+      kind: 'EPIC_CHILDREN_PERCENT';
+      /** Epic task id (work item in a project). */
+      epicTaskId: string;
+    };
+
 export interface GoalMetricDto {
   id: string;
   goalId: string;
@@ -1225,6 +1956,9 @@ export interface GoalMetricDto {
   target: number;
   unit?: string;
   updatedAt: Date;
+  definition?: GoalMetricDefinition | null;
+  lastComputedAt?: Date | null;
+  lastError?: string | null;
 }
 
 export interface CreateGoalRequest {
@@ -1249,21 +1983,81 @@ export interface CreateGoalMetricRequest {
   type: GoalMetricType;
   target: number;
   unit?: string;
+  /** When set, the server computes `current` from tasks / fields (see GoalMetricDefinition). */
+  definition?: GoalMetricDefinition;
 }
 
 export interface UpdateGoalMetricRequest {
   current?: number;
   target?: number;
+  name?: string;
+  unit?: string;
+  type?: GoalMetricType;
+  definition?: GoalMetricDefinition | null;
 }
 
 // ─── REPORTING ───────────────────────────────────────────────────────────────
 
+/** Filters for workspace-level reporting (summary, export, dashboard NUMBER_METRIC). */
+export interface WorkspaceReportingFilters {
+  /** Inclusive period start (YYYY-MM-DD). Default: today − 30d. */
+  from?: string;
+  /** Inclusive period end (YYYY-MM-DD). Default: today. */
+  to?: string;
+  /** Limit to tasks in these projects (must belong to the workspace). */
+  projectIds?: string[];
+  /** Limit to tasks in projects contained in this portfolio (workspace must match). */
+  portfolioId?: string;
+  /** Tasks with at least one assignee in this set. */
+  assigneeIds?: string[];
+  /** Subset of task statuses. */
+  statuses?: string[];
+  /** Tasks having all listed tag ids. */
+  tagIds?: string[];
+}
+
+/** One calendar week (Mon–Sun, local) with completed-task count in the reporting window. */
+export interface ReportingThroughputWeekDto {
+  weekStart: string;
+  weekEnd: string;
+  completedCount: number;
+}
+
+/** Lead/cycle time for DONE tasks completed in the reporting period (same filter scope). */
+export interface ReportingFlowMetricsDto {
+  /** create → done (days), all DONE completions in period. */
+  leadTimeDays: {
+    avg: number | null;
+    median: number | null;
+    sampleSize: number;
+  };
+  /**
+   * startDate → done (days) when `Task.startDate` is set; otherwise omitted from sample.
+   * Use for schedule-based cycle time; compare with lead time when many tasks lack dates.
+   */
+  cycleTimeDays: {
+    avg: number | null;
+    median: number | null;
+    sampleSize: number;
+  };
+}
+
 export interface WorkspaceReportingSummaryDto {
   workspaceId: string;
+  /** Effective reporting window (date-only ISO). */
+  period: { from: string; to: string };
+  /** Echo of filters used to compute the summary (defaults applied). */
+  appliedFilters: WorkspaceReportingFilters;
   tasksByStatus: Record<string, number>;
   openTaskCount: number;
+  /** Completed in period (`completedAt` within [from, to] end-of-day). */
   completedLast30Days: number;
+  /** Created in period (`createdAt` within [from, to] end-of-day). */
   createdLast30Days: number;
+  /** Weekly throughput of completions (calendar weeks overlapping the period). */
+  throughputByWeek: ReportingThroughputWeekDto[];
+  /** Lead time and cycle-time stats for items completed in the period. */
+  flowMetrics: ReportingFlowMetricsDto;
   workload: Array<{
     userId: string;
     displayName: string;
@@ -1271,10 +2065,35 @@ export interface WorkspaceReportingSummaryDto {
   }>;
 }
 
+export interface ReportingSavedViewDto {
+  id: string;
+  workspaceId: string;
+  createdById: string;
+  name: string;
+  sortOrder: number;
+  config: WorkspaceReportingFilters;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface CreateReportingSavedViewRequest {
+  name: string;
+  config: WorkspaceReportingFilters;
+  sortOrder?: number;
+}
+
+export interface UpdateReportingSavedViewRequest {
+  name?: string;
+  config?: WorkspaceReportingFilters;
+  sortOrder?: number;
+}
+
 /** One cell in the project workload matrix (open tasks × story points). */
 export interface ProjectWorkloadCellDto {
   taskCount: number;
   storyPoints: number;
+  /** Sum of assignee `unitsPercent` for tasks in this bucket (MSP-style load). */
+  allocationPercent: number;
 }
 
 /** GET …/projects/:projectId/workload — one row per assignee (plus Unassigned). */
@@ -1385,6 +2204,7 @@ export type DashboardWidgetType =
   | 'TASKS_BY_STATUS'
   | 'PROJECT_SUMMARY'
   | 'PROJECT_CFD'
+  | 'PROJECT_EVM'
   | 'PORTFOLIO_ACTIVE_SPRINTS'
   | 'PORTFOLIO_SPRINT_VELOCITY'
   | 'NUMBER_METRIC'
@@ -1457,6 +2277,39 @@ export interface DashboardDto {
   layoutMeta?: Record<string, unknown>;
   widgets?: DashboardWidgetDto[];
   widgetCount?: number;
+}
+
+export interface DashboardLayoutPresetSummaryDto {
+  id: string;
+  name: string;
+  description: string;
+}
+
+export interface DashboardTemplateSummaryDto {
+  id: string;
+  name: string;
+  description: string;
+}
+
+/** Resolved NUMBER_METRIC when backed by reporting (GET dashboard with resolved). */
+export interface DashboardNumberMetricSparklinePointDto {
+  label: string;
+  value: number;
+}
+
+export interface DuplicateDashboardRequest {
+  /** Defaults to "{name} (copy)" */
+  name?: string;
+}
+
+export interface CreateDashboardFromTemplateRequest {
+  templateId: string;
+  /** Defaults to the template display name */
+  name?: string;
+}
+
+export interface ApplyDashboardLayoutPresetRequest {
+  presetId: string;
 }
 
 export interface CreateDashboardRequest {

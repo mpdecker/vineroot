@@ -10,11 +10,12 @@ describe('GoalController (HTTP)', () => {
   const goalService = {
     listByWorkspace: jest.fn(),
     create: jest.fn(),
-    findById: jest.fn(),
+    findByIdInWorkspace: jest.fn(),
     update: jest.fn(),
     deleteGoal: jest.fn(),
     createMetric: jest.fn(),
     updateMetric: jest.fn(),
+    recomputeMetric: jest.fn(),
   };
 
   const allowGuard: CanActivate = {
@@ -65,14 +66,14 @@ describe('GoalController (HTTP)', () => {
     expect(goalService.create).toHaveBeenCalledWith('ws1', { name: 'Q1' });
   });
 
-  it('GET /:id fetches goal', async () => {
-    goalService.findById.mockResolvedValue({ id: 'g1' });
+  it('GET /:id fetches goal in workspace', async () => {
+    goalService.findByIdInWorkspace.mockResolvedValue({ id: 'g1' });
 
     await request(app.getHttpServer())
       .get('/api/v1/workspaces/ws1/goals/g1')
       .expect(200);
 
-    expect(goalService.findById).toHaveBeenCalledWith('g1');
+    expect(goalService.findByIdInWorkspace).toHaveBeenCalledWith('g1', 'ws1');
   });
 
   it('PATCH /:id updates', async () => {
@@ -83,7 +84,7 @@ describe('GoalController (HTTP)', () => {
       .send({ name: 'Q1b' })
       .expect(200);
 
-    expect(goalService.update).toHaveBeenCalledWith('g1', { name: 'Q1b' });
+    expect(goalService.update).toHaveBeenCalledWith('g1', 'ws1', { name: 'Q1b' });
   });
 
   it('DELETE /:id deletes with workspace id', async () => {
@@ -101,12 +102,13 @@ describe('GoalController (HTTP)', () => {
 
     await request(app.getHttpServer())
       .post('/api/v1/workspaces/ws1/goals/g1/metrics')
-      .send({ name: 'Revenue', targetValue: 100 })
+      .send({ name: 'Revenue', type: 'PERCENT', target: 100 })
       .expect(201);
 
-    expect(goalService.createMetric).toHaveBeenCalledWith('g1', {
+    expect(goalService.createMetric).toHaveBeenCalledWith('ws1', 'g1', {
       name: 'Revenue',
-      targetValue: 100,
+      type: 'PERCENT',
+      target: 100,
     });
   });
 
@@ -115,9 +117,19 @@ describe('GoalController (HTTP)', () => {
 
     await request(app.getHttpServer())
       .patch('/api/v1/workspaces/ws1/goals/metrics/m1')
-      .send({ currentValue: 10 })
+      .send({ current: 10 })
       .expect(200);
 
-    expect(goalService.updateMetric).toHaveBeenCalledWith('m1', { currentValue: 10 });
+    expect(goalService.updateMetric).toHaveBeenCalledWith('ws1', 'm1', { current: 10 });
+  });
+
+  it('POST /metrics/:metricId/recompute', async () => {
+    goalService.recomputeMetric.mockResolvedValue({ id: 'g1' });
+
+    await request(app.getHttpServer())
+      .post('/api/v1/workspaces/ws1/goals/metrics/m1/recompute')
+      .expect(200);
+
+    expect(goalService.recomputeMetric).toHaveBeenCalledWith('ws1', 'm1');
   });
 });

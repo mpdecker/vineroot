@@ -1,8 +1,9 @@
 import { TaskStatus } from '@prisma/client';
+import { startOfCalendarDay } from './project-sprint-metrics.util';
 import {
-  startOfCalendarDay,
-  calendarDayToIsoKey,
-} from './project-sprint-metrics.util';
+  addCalendarDaysToDateKey,
+  weekStartMondayDateKeyInTimeZone,
+} from '../schedule/schedule-calendar.util';
 import type {
   ProjectWorkloadCellDto,
   ProjectWorkloadDto,
@@ -41,7 +42,11 @@ export type WorkloadTaskRow = {
   storyPoints: number | null;
   startDate: Date | null;
   dueDate: Date | null;
-  assignees: { userId: string; user: { displayName: string } }[];
+  assignees: {
+    userId: string;
+    user: { displayName: string };
+    unitsPercent?: number | null;
+  }[];
 };
 
 const UNASSIGNED_ID = '__unassigned__';
@@ -51,19 +56,24 @@ function emptyAgg(weekCount: number) {
     cells: Array.from({ length: weekCount }, () => ({
       taskCount: 0,
       storyPoints: 0,
+      allocationPercent: 0,
     })),
-    unscheduled: { taskCount: 0, storyPoints: 0 },
-    outOfRange: { taskCount: 0, storyPoints: 0 },
+    unscheduled: { taskCount: 0, storyPoints: 0, allocationPercent: 0 },
+    outOfRange: { taskCount: 0, storyPoints: 0, allocationPercent: 0 },
   };
 }
 
+/**
+ * @param weekMondayKeys YYYY-MM-DD Monday keys for each column (project / workspace calendar TZ).
+ * @param timeZone IANA zone used to bucket task anchor dates into weeks (must match key generation).
+ */
 export function buildProjectWorkloadDto(
   projectId: string,
-  weekStarts: Date[],
+  weekMondayKeys: string[],
   tasks: WorkloadTaskRow[],
+  timeZone: string,
 ): ProjectWorkloadDto {
-  const weekCount = weekStarts.length;
-  const weekKeys = weekStarts.map((ws) => calendarDayToIsoKey(ws));
+  const weekCount = weekMondayKeys.length;
   const map = new Map<
     string,
     {
@@ -93,21 +103,25 @@ export function buildProjectWorkloadDto(
       ensure(a.userId, a.user.displayName);
       const agg = map.get(a.userId)!;
 
+      const units = a.unitsPercent != null && Number.isFinite(a.unitsPercent) ? a.unitsPercent : 100;
+
       if (!anchor) {
         agg.unscheduled.taskCount += 1;
         agg.unscheduled.storyPoints += points;
+        if (a.userId !== UNASSIGNED_ID) agg.unscheduled.allocationPercent += units;
         continue;
       }
 
-      const wk = startOfWeekMonday(anchor);
-      const k = calendarDayToIsoKey(wk);
-      const idx = weekKeys.indexOf(k);
+      const k = weekStartMondayDateKeyInTimeZone(anchor, timeZone);
+      const idx = weekMondayKeys.indexOf(k);
       if (idx === -1) {
         agg.outOfRange.taskCount += 1;
         agg.outOfRange.storyPoints += points;
+        if (a.userId !== UNASSIGNED_ID) agg.outOfRange.allocationPercent += units;
       } else {
         agg.cells[idx].taskCount += 1;
         agg.cells[idx].storyPoints += points;
+        if (a.userId !== UNASSIGNED_ID) agg.cells[idx].allocationPercent += units;
       }
     }
   }
@@ -130,15 +144,14 @@ export function buildProjectWorkloadDto(
     });
   });
 
-  const lastWeekStart = weekStarts[weekCount - 1];
-  const toEnd = new Date(lastWeekStart);
-  toEnd.setDate(toEnd.getDate() + 6);
+  const lastMonday = weekMondayKeys[weekCount - 1];
+  const toEndKey = addCalendarDaysToDateKey(lastMonday, 6);
 
   return {
     projectId,
-    from: calendarDayToIsoKey(weekStarts[0]),
-    to: calendarDayToIsoKey(toEnd),
-    weekStarts: weekKeys,
+    from: weekMondayKeys[0],
+    to: toEndKey,
+    weekStarts: weekMondayKeys,
     rows,
   };
 }

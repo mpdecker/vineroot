@@ -14,6 +14,8 @@ import { ProjectActivityView } from '../../components/project/ProjectActivityVie
 import { ProjectBurndownView } from '../../components/project/ProjectBurndownView';
 import { ProjectFlowView } from '../../components/project/ProjectFlowView';
 import { ProjectWorkloadView } from '../../components/project/ProjectWorkloadView';
+import { ProjectNetworkView } from '../../components/project/ProjectNetworkView';
+import { ProjectTimephasedView } from '../../components/project/ProjectTimephasedView';
 import { ProjectSavedViewsModal } from '../../components/project/ProjectSavedViewsModal';
 import { TaskDetail } from '../../components/task/TaskDetail';
 import { useAuthStore } from '../../stores/auth.store';
@@ -30,6 +32,19 @@ import {
 import type { Section } from '../../types';
 import { pickDefaultSprintId } from '../../lib/pickDefaultSprint';
 import { sortSectionsByBacklogRank } from '../../lib/sortBacklogRoots';
+import {
+  filterSectionsBySchedule,
+  sortSectionsBySchedule,
+  type ListScheduleFilter,
+  type ListScheduleSort,
+} from '../../lib/filterSectionsBySchedule';
+import { useProjectScheduleCriticalPath } from '../../hooks/useProjectScheduleCriticalPath';
+import {
+  parseTimephasedBasis,
+  parseTimephasedGranularity,
+  parseTimephasedGridMode,
+} from '../../lib/timephasedSearchParams';
+import { computeTaskScheduleInsight } from '../../lib/taskScheduleInsight';
 import { Loader2 } from 'lucide-react';
 
 function readRootsOnlyFromStorage(key: string): boolean {
@@ -62,6 +77,33 @@ function readEpicFilter(projectId: string): EpicFilterValue {
   return 'all';
 }
 
+function readListScheduleFilter(projectId: string): ListScheduleFilter {
+  try {
+    const v = sessionStorage.getItem(`vineroot:project:${projectId}:listScheduleFilter`);
+    if (v === 'critical' || v === 'slack' || v === 'deadline') return v;
+  } catch {
+    /* ignore */
+  }
+  return 'all';
+}
+
+function readListScheduleSort(projectId: string): ListScheduleSort {
+  try {
+    const v = sessionStorage.getItem(`vineroot:project:${projectId}:listScheduleSort`);
+    if (
+      v === 'critical_first' ||
+      v === 'slack_desc' ||
+      v === 'deadline_breach_first' ||
+      v === 'constraint_type'
+    ) {
+      return v;
+    }
+  } catch {
+    /* ignore */
+  }
+  return 'none';
+}
+
 /** List/board only: hide nested subtasks (dense projects). */
 function sectionsRootsOnly(sections: Section[]): Section[] {
   return sections.map((s) => ({
@@ -83,6 +125,8 @@ export default function ProjectPage() {
   const [rootsOnly, setRootsOnly] = useState(false);
   const [sprintFilter, setSprintFilter] = useState<SprintFilterValue>('all');
   const [epicFilter, setEpicFilter] = useState<EpicFilterValue>('all');
+  const [listScheduleFilter, setListScheduleFilter] = useState<ListScheduleFilter>('all');
+  const [listScheduleSort, setListScheduleSort] = useState<ListScheduleSort>('none');
 
   useEffect(() => {
     if (!project?.id) return;
@@ -90,6 +134,8 @@ export default function ProjectPage() {
     setRootsOnly(readRootsOnlyFromStorage(key));
     setSprintFilter(readSprintFilter(project.id));
     setEpicFilter(readEpicFilter(project.id));
+    setListScheduleFilter(readListScheduleFilter(project.id));
+    setListScheduleSort(readListScheduleSort(project.id));
   }, [project?.id]);
 
   const epicTasks = useMemo(
@@ -231,6 +277,66 @@ export default function ProjectPage() {
     return base;
   }, [sprintScopedSections, rootsOnly, currentView]);
 
+  const listScheduleViewsEnabled = ['list', 'board', 'backlog', 'sprint-board'].includes(
+    currentView,
+  );
+
+  const scheduleCp = useProjectScheduleCriticalPath(
+    project?.id,
+    project?.workspaceIds?.[0],
+    Boolean(project?.id && listScheduleViewsEnabled),
+  );
+
+  const listBoardSectionsSchedule = useMemo(() => {
+    const ws = project?.workspaceIds?.[0];
+    if (!ws || !listScheduleViewsEnabled) return listBoardSections;
+    if (scheduleCp.loadFailed) {
+      return listBoardSections;
+    }
+    let secs = filterSectionsBySchedule(
+      listBoardSections,
+      listScheduleFilter,
+      scheduleCp.scheduleByTaskId,
+      scheduleCp.criticalIds,
+    );
+    secs = sortSectionsBySchedule(
+      secs,
+      listScheduleSort,
+      scheduleCp.scheduleByTaskId,
+      scheduleCp.criticalIds,
+    );
+    return secs;
+  }, [
+    listBoardSections,
+    project?.workspaceIds,
+    listScheduleViewsEnabled,
+    listScheduleFilter,
+    listScheduleSort,
+    scheduleCp.scheduleByTaskId,
+    scheduleCp.criticalIds,
+    scheduleCp.loadFailed,
+  ]);
+
+  const persistListScheduleFilter = (v: ListScheduleFilter) => {
+    if (!project?.id) return;
+    setListScheduleFilter(v);
+    try {
+      sessionStorage.setItem(`vineroot:project:${project.id}:listScheduleFilter`, v);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const persistListScheduleSort = (v: ListScheduleSort) => {
+    if (!project?.id) return;
+    setListScheduleSort(v);
+    try {
+      sessionStorage.setItem(`vineroot:project:${project.id}:listScheduleSort`, v);
+    } catch {
+      /* ignore */
+    }
+  };
+
   const applySavedViewConfig = (config: ProjectSavedViewConfigDto) => {
     if (!project?.id) return;
     if (config.sprintFilter !== undefined) {
@@ -242,6 +348,12 @@ export default function ProjectPage() {
     if (config.rootsOnly !== undefined) {
       persistRootsOnly(config.rootsOnly);
     }
+    if (config.listScheduleFilter !== undefined) {
+      persistListScheduleFilter(config.listScheduleFilter as ListScheduleFilter);
+    }
+    if (config.listScheduleSort !== undefined) {
+      persistListScheduleSort(config.listScheduleSort as ListScheduleSort);
+    }
     if (config.surface === 'workload') {
       const qs = new URLSearchParams();
       if (config.workloadWeeks != null) {
@@ -252,6 +364,25 @@ export default function ProjectPage() {
       }
       const q = qs.toString();
       navigate(`/projects/${project.id}/workload${q ? `?${q}` : ''}`);
+      return;
+    }
+    if (config.surface === 'timephased') {
+      const qs = new URLSearchParams();
+      if (config.timephasedGranularity) {
+        qs.set('granularity', config.timephasedGranularity);
+      }
+      if (config.timephasedBasis) {
+        qs.set('basis', config.timephasedBasis);
+      }
+      if (config.timephasedGridMode) {
+        qs.set('grid', config.timephasedGridMode);
+      }
+      const q = qs.toString();
+      navigate(`/projects/${project.id}/timephased${q ? `?${q}` : ''}`);
+      return;
+    }
+    if (config.surface === 'network') {
+      navigate(`/projects/${project.id}/network`);
       return;
     }
     if (config.surface === 'epics') {
@@ -320,20 +451,47 @@ export default function ProjectPage() {
                 : undefined,
             workloadFrom:
               currentView === 'workload' ? (searchParams.get('from') ?? '') : '',
+            listScheduleFilter,
+            listScheduleSort,
+            ...(currentView === 'timephased'
+              ? {
+                  timephasedGranularity: parseTimephasedGranularity(searchParams),
+                  timephasedBasis: parseTimephasedBasis(searchParams),
+                  timephasedGridMode: parseTimephasedGridMode(searchParams),
+                }
+              : {}),
           }}
           onApply={applySavedViewConfig}
         />
         <div className="flex-1 overflow-auto">
           {(currentView === 'list' || currentView === 'backlog') && (
             <ProjectListView
-              sections={listBoardSections}
+              sections={listBoardSectionsSchedule}
               projectId={project.id}
               onSelectTask={openTask}
+              scheduleWorkspaceId={project.workspaceIds?.[0]}
+              scheduleFilter={listScheduleFilter}
+              scheduleSort={listScheduleSort}
+              scheduleLoading={scheduleCp.loading}
+              scheduleLoadFailed={scheduleCp.loadFailed}
+              onScheduleFilterChange={persistListScheduleFilter}
+              onScheduleSortChange={persistListScheduleSort}
+              getScheduleInsight={(task) =>
+                computeTaskScheduleInsight(
+                  task,
+                  scheduleCp.scheduleByTaskId,
+                  scheduleCp.criticalIds,
+                  {
+                    loadFailed: scheduleCp.loadFailed,
+                    loading: scheduleCp.loading,
+                  },
+                )
+              }
             />
           )}
           {(currentView === 'board' || currentView === 'sprint-board') && (
             <ProjectBoardView
-              sections={listBoardSections}
+              sections={listBoardSectionsSchedule}
               projectId={project.id}
               kanbanWipEnforcement={project.kanbanWipEnforcement ?? 'OFF'}
               onSelectTask={openTask}
@@ -344,7 +502,24 @@ export default function ProjectPage() {
           )}
           {currentView === 'epics' && <ProjectEpicDashboardView projectId={project.id} />}
           {currentView === 'timeline' && (
-            <ProjectTimelineView sections={sprintScopedSections} projectId={project.id} />
+            <ProjectTimelineView
+              sections={sprintScopedSections}
+              projectId={project.id}
+              workspaceId={project.workspaceIds[0]}
+              projectName={project.name}
+            />
+          )}
+          {currentView === 'network' && project.workspaceIds[0] && (
+            <ProjectNetworkView
+              projectId={project.id}
+              workspaceId={project.workspaceIds[0]}
+            />
+          )}
+          {currentView === 'timephased' && project.workspaceIds[0] && (
+            <ProjectTimephasedView
+              projectId={project.id}
+              workspaceId={project.workspaceIds[0]}
+            />
           )}
           {currentView === 'calendar' && (
             <ProjectCalendarView sections={sprintScopedSections} />
@@ -356,6 +531,7 @@ export default function ProjectPage() {
           {currentView === 'workload' && (
             <ProjectWorkloadView
               projectId={project.id}
+              workspaceId={project.workspaceIds[0] ?? ''}
               sprintFilter={sprintFilter}
               epicFilter={epicFilter}
             />
@@ -371,6 +547,7 @@ export default function ProjectPage() {
         <TaskDetail
           task={activeTask}
           workspaceIds={project.workspaceIds}
+          scheduleWorkspaceId={project.workspaceIds?.[0]}
           sprints={project.sprints}
           isOpen={!!activeTaskId}
           onClose={closeTask}

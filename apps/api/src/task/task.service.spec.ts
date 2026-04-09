@@ -1,5 +1,12 @@
 import { Test } from '@nestjs/testing';
-import { AuditEventType, DependencyType } from '@prisma/client';
+import { BadRequestException } from '@nestjs/common';
+import {
+  AuditEventType,
+  CustomFieldComputedKind,
+  DependencyType,
+  Prisma,
+  ScheduleLinkType,
+} from '@prisma/client';
 import { TaskService } from './task.service';
 import { AttachmentService } from '../attachment/attachment.service';
 import { PrismaService } from '../common/prisma.service';
@@ -7,6 +14,8 @@ import { EventsGateway } from '../common/events.gateway';
 import { AutomationService } from '../automation/automation.service';
 import { OutboundWebhookService } from '../outbound-webhook/outbound-webhook.service';
 import { TaskActivityLogService } from '../activity-log/task-activity-log.service';
+import { GoalMetricComputeService } from '../goal/goal-metric-compute.service';
+import { CustomFieldRollupService } from '../custom-field/custom-field-rollup.service';
 import {
   TaskPriority,
   TaskStatus,
@@ -106,6 +115,15 @@ describe('TaskService', () => {
     },
     projectWorkspace: {
       findMany: jest.fn(),
+      findFirst: jest.fn(),
+    },
+    genericResource: {
+      findUnique: jest.fn(),
+    },
+    taskGenericResourceAssignment: {
+      create: jest.fn(),
+      update: jest.fn(),
+      delete: jest.fn(),
     },
     taskAssignee: {
       create: jest.fn(),
@@ -113,7 +131,11 @@ describe('TaskService', () => {
     },
     taskDependency: {
       create: jest.fn(),
+      update: jest.fn(),
       delete: jest.fn(),
+    },
+    scheduleProgramProject: {
+      findMany: jest.fn().mockResolvedValue([]),
     },
     attachment: {
       create: jest.fn(),
@@ -152,6 +174,12 @@ describe('TaskService', () => {
   const attachmentService = {
     removeLocalStoredFile: jest.fn().mockResolvedValue(undefined),
   };
+  const goalMetricCompute = {
+    scheduleRecomputeWorkspace: jest.fn(),
+  };
+  const customFieldRollupService = {
+    mergeRollupsForTaskDetailTree: jest.fn().mockResolvedValue(undefined),
+  };
 
   beforeEach(async () => {
     jest.clearAllMocks();
@@ -164,6 +192,11 @@ describe('TaskService', () => {
         { provide: OutboundWebhookService, useValue: outboundWebhookService },
         { provide: TaskActivityLogService, useValue: taskActivityLog },
         { provide: AttachmentService, useValue: attachmentService },
+        { provide: GoalMetricComputeService, useValue: goalMetricCompute },
+        {
+          provide: CustomFieldRollupService,
+          useValue: customFieldRollupService,
+        },
       ],
     }).compile();
 
@@ -358,6 +391,7 @@ describe('TaskService', () => {
           name: 'Estimate',
           type: CustomFieldType.TEXT,
           isRequired: true,
+          computedKind: CustomFieldComputedKind.NONE,
         },
       },
     ]);
@@ -414,7 +448,7 @@ describe('TaskService', () => {
       .mockResolvedValueOnce({ projectId: 'proj-1', workspaceId: null });
     prisma.projectWorkspace.findMany.mockResolvedValue([{ workspaceId: 'w1' }]);
 
-    await service.addAssignee('task-1', 'actor-1', 'u-new');
+    await service.addAssignee('task-1', 'actor-1', { userId: 'u-new' });
 
     expect(taskActivityLog.log).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -422,7 +456,7 @@ describe('TaskService', () => {
         taskId: 'task-1',
         eventType: AuditEventType.TASK_ASSIGNED,
         description: 'Assigned Pat',
-        newValue: { assigneeId: 'u-new' },
+        newValue: { assigneeId: 'u-new', unitsPercent: 100 },
       }),
     );
     expect(eventsGateway.emitToWorkspace).toHaveBeenCalledWith(
@@ -459,6 +493,124 @@ describe('TaskService', () => {
         eventType: AuditEventType.TASK_UPDATED,
         description: 'Removed assignee Old',
         oldValue: { assigneeId: 'u-old' },
+      }),
+    );
+  });
+
+  it('addGenericResourceAssignment creates row, logs, and emits', async () => {
+    const prior = minimalTaskRow({
+      workspaceId: 'w1',
+      projectId: 'proj-1',
+      assignees: [],
+    });
+    prisma.genericResource.findUnique.mockResolvedValue({
+      id: 'gr-1',
+      workspaceId: 'w1',
+      name: 'Excavator',
+    });
+    prisma.taskGenericResourceAssignment.create.mockResolvedValue({});
+    const detail = minimalDetailRow({
+      workspaceId: 'w1',
+      genericResourceAssignments: [
+        {
+          id: 'tgra-1',
+          taskId: 'task-1',
+          genericResourceId: 'gr-1',
+          unitsPercent: 50,
+          assignedAt: new Date(),
+          genericResource: { id: 'gr-1', name: 'Excavator', maxUnitsPercent: 100 },
+        },
+      ],
+    });
+    prisma.task.findUnique
+      .mockResolvedValueOnce(prior)
+      .mockResolvedValueOnce(detail)
+      .mockResolvedValueOnce({ projectId: 'proj-1', workspaceId: 'w1' });
+    prisma.projectWorkspace.findMany.mockResolvedValue([{ workspaceId: 'w1' }]);
+
+    await service.addGenericResourceAssignment('task-1', 'actor-1', {
+      genericResourceId: 'gr-1',
+      unitsPercent: 50,
+    });
+
+    expect(prisma.taskGenericResourceAssignment.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          taskId: 'task-1',
+          genericResourceId: 'gr-1',
+          unitsPercent: 50,
+        }),
+      }),
+    );
+    expect(taskActivityLog.log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: AuditEventType.TASK_UPDATED,
+        description: expect.stringContaining('Excavator'),
+      }),
+    );
+    expect(eventsGateway.emitToWorkspace).toHaveBeenCalled();
+  });
+
+  it('addGenericResourceAssignment rejects resource from another workspace', async () => {
+    const prior = minimalTaskRow({ workspaceId: 'w1', projectId: 'proj-1' });
+    prisma.task.findUnique.mockResolvedValue(prior);
+    prisma.genericResource.findUnique.mockResolvedValue({
+      id: 'gr-x',
+      workspaceId: 'other-ws',
+      name: 'X',
+    });
+
+    await expect(
+      service.addGenericResourceAssignment('task-1', 'actor-1', {
+        genericResourceId: 'gr-x',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(prisma.taskGenericResourceAssignment.create).not.toHaveBeenCalled();
+  });
+
+  it('patchGenericResourceAssignment updates unitsPercent', async () => {
+    const prior = minimalTaskRow({ workspaceId: 'w1', projectId: 'proj-1' });
+    prisma.taskGenericResourceAssignment.update.mockResolvedValue({});
+    const detail = minimalDetailRow({ genericResourceAssignments: [] });
+    prisma.task.findUnique
+      .mockResolvedValueOnce(prior)
+      .mockResolvedValueOnce(detail)
+      .mockResolvedValueOnce({ projectId: 'proj-1', workspaceId: 'w1' });
+    prisma.projectWorkspace.findMany.mockResolvedValue([{ workspaceId: 'w1' }]);
+
+    await service.patchGenericResourceAssignment('task-1', 'actor-1', 'gr-1', {
+      unitsPercent: 25,
+    });
+
+    expect(prisma.taskGenericResourceAssignment.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { taskId_genericResourceId: { taskId: 'task-1', genericResourceId: 'gr-1' } },
+        data: { unitsPercent: 25 },
+      }),
+    );
+  });
+
+  it('removeGenericResourceAssignment deletes and logs', async () => {
+    const prior = minimalTaskRow({ workspaceId: 'w1', projectId: 'proj-1' });
+    prisma.genericResource.findUnique.mockResolvedValue({ name: 'Lift' });
+    prisma.taskGenericResourceAssignment.delete.mockResolvedValue({});
+    const detail = minimalDetailRow({ genericResourceAssignments: [] });
+    prisma.task.findUnique
+      .mockResolvedValueOnce(prior)
+      .mockResolvedValueOnce(detail)
+      .mockResolvedValueOnce({ projectId: 'proj-1', workspaceId: 'w1' });
+    prisma.projectWorkspace.findMany.mockResolvedValue([{ workspaceId: 'w1' }]);
+
+    await service.removeGenericResourceAssignment('task-1', 'actor-1', 'gr-1');
+
+    expect(prisma.taskGenericResourceAssignment.delete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { taskId_genericResourceId: { taskId: 'task-1', genericResourceId: 'gr-1' } },
+      }),
+    );
+    expect(taskActivityLog.log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        description: expect.stringContaining('Lift'),
       }),
     );
   });
@@ -662,6 +814,7 @@ describe('TaskService', () => {
             dependentId: 'task-1',
             blockingId: 'task-2',
             type: DependencyType.WAITING_ON,
+            lagDays: 2,
             createdAt: now,
             blockingTask: {
               id: 'task-2',
@@ -700,8 +853,10 @@ describe('TaskService', () => {
 
     const dto = await service.findById('task-1');
 
+    expect(customFieldRollupService.mergeRollupsForTaskDetailTree).toHaveBeenCalled();
     expect(dto?.waitingOn).toHaveLength(1);
     expect(dto?.waitingOn?.[0].blockingTask?.title).toBe('Blocker');
+    expect(dto?.waitingOn?.[0].lagDays).toBe(2);
     expect(dto?.attachments?.[0].filename).toBe('doc.pdf');
     expect(dto?.activityLogs?.[0].description).toBe('Field changed');
     expect(dto?.activityLogs?.[0].actor?.displayName).toBe('Alex');
@@ -712,6 +867,145 @@ describe('TaskService', () => {
       minimalDetailRow({ deletedAt: new Date() }),
     );
     await expect(service.findById('gone')).resolves.toBeNull();
+  });
+
+  it('findById maps scheduleSegments from stored JSON', async () => {
+    prisma.task.findUnique.mockResolvedValue(
+      minimalDetailRow({
+        scheduleSegments: [
+          {
+            start: '2026-01-01T00:00:00.000Z',
+            end: '2026-01-02T00:00:00.000Z',
+            workMinutes: 30,
+          },
+        ],
+      }),
+    );
+
+    const dto = await service.findById('task-1');
+
+    expect(dto?.scheduleSegments).toEqual([
+      {
+        start: '2026-01-01T00:00:00.000Z',
+        end: '2026-01-02T00:00:00.000Z',
+        workMinutes: 30,
+      },
+    ]);
+  });
+
+  it('create persists scheduleSegments on project task', async () => {
+    const segs = [
+      { start: '2026-02-01T00:00:00.000Z', end: '2026-02-02T00:00:00.000Z' },
+    ];
+    const row = minimalTaskRow({ scheduleSegments: segs });
+    prisma.task.create.mockResolvedValue(row);
+    prisma.project.findFirst.mockResolvedValue({
+      id: 'proj-1',
+      deletedAt: null,
+      workspaceLinks: [{ workspaceId: 'ws-1' }],
+    });
+
+    await service.create('proj-1', 'user-1', {
+      title: 'Split',
+      scheduleSegments: segs,
+    });
+
+    expect(prisma.task.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ scheduleSegments: segs }),
+      }),
+    );
+  });
+
+  it('update persists scheduleSegments', async () => {
+    const segs = [
+      { start: '2026-01-01T00:00:00.000Z', end: '2026-01-03T00:00:00.000Z' },
+    ];
+    const prior = minimalDetailRow();
+    const updated = minimalTaskRow({ scheduleSegments: segs });
+    prisma.task.findUnique.mockResolvedValue(prior);
+    prisma.task.update.mockResolvedValue(updated);
+    prisma.projectWorkspace.findMany.mockResolvedValue([{ workspaceId: 'w1' }]);
+
+    await service.update('task-1', 'user-1', { scheduleSegments: segs });
+
+    expect(prisma.task.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ scheduleSegments: segs }),
+      }),
+    );
+  });
+
+  it('update sets scheduleSegments to JsonNull when cleared', async () => {
+    const prior = minimalDetailRow();
+    const updated = minimalTaskRow({ scheduleSegments: null });
+    prisma.task.findUnique.mockResolvedValue(prior);
+    prisma.task.update.mockResolvedValue(updated);
+    prisma.projectWorkspace.findMany.mockResolvedValue([{ workspaceId: 'w1' }]);
+
+    await service.update('task-1', 'user-1', { scheduleSegments: null });
+
+    expect(prisma.task.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ scheduleSegments: Prisma.JsonNull }),
+      }),
+    );
+  });
+
+  it('update rejects scheduleSegments when a row lacks end', async () => {
+    prisma.task.findUnique.mockResolvedValue(minimalDetailRow());
+
+    await expect(
+      service.update('task-1', 'user-1', {
+        scheduleSegments: [{ start: '2026-01-01T00:00:00.000Z' }] as never,
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(prisma.task.update).not.toHaveBeenCalled();
+  });
+
+  it('update rejects scheduleSegments when workMinutes is not finite', async () => {
+    prisma.task.findUnique.mockResolvedValue(minimalDetailRow());
+
+    await expect(
+      service.update('task-1', 'user-1', {
+        scheduleSegments: [
+          {
+            start: '2026-01-01T00:00:00.000Z',
+            end: '2026-01-02T00:00:00.000Z',
+            workMinutes: Number.NaN,
+          },
+        ],
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(prisma.task.update).not.toHaveBeenCalled();
+  });
+
+  it('update persists workContour', async () => {
+    const prior = minimalDetailRow();
+    const updated = minimalTaskRow({ workContour: 'FRONT_LOADED' });
+    prisma.task.findUnique.mockResolvedValue(prior);
+    prisma.task.update.mockResolvedValue(updated);
+    prisma.projectWorkspace.findMany.mockResolvedValue([{ workspaceId: 'w1' }]);
+
+    await service.update('task-1', 'user-1', { workContour: 'FRONT_LOADED' });
+
+    expect(prisma.task.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ workContour: 'FRONT_LOADED' }),
+      }),
+    );
+  });
+
+  it('update rejects invalid workContour', async () => {
+    prisma.task.findUnique.mockResolvedValue(minimalDetailRow());
+
+    await expect(
+      service.update('task-1', 'user-1', { workContour: 'TURTLE' as never }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(prisma.task.update).not.toHaveBeenCalled();
   });
 
   it('addDependency rejects self-dependency', async () => {
@@ -733,7 +1027,7 @@ describe('TaskService', () => {
 
     await expect(
       service.addDependency('u1', 'a', { blockingTaskId: 'b' }),
-    ).rejects.toThrow('same project');
+    ).rejects.toThrow('schedule program');
   });
 
   it('addDependency maps unique violation to BadRequest', async () => {
@@ -776,6 +1070,9 @@ describe('TaskService', () => {
         dependentId: 'a',
         blockingId: 'b',
         type: DependencyType.WAITING_ON,
+        linkType: ScheduleLinkType.FS,
+        lagDays: 0,
+        lagIsElapsed: false,
       },
     });
     expect(taskActivityLog.log).toHaveBeenCalledWith(
@@ -786,6 +1083,61 @@ describe('TaskService', () => {
       }),
     );
     expect(dto.id).toBe('a');
+  });
+
+  it('addDependency persists lagDays when provided', async () => {
+    prisma.task.findUnique.mockImplementation((args: any) => {
+      if (args.include?.dependencies !== undefined) {
+        return minimalDetailRow({ id: 'a', dependencies: [] });
+      }
+      const id = args.where.id;
+      if (id === 'a')
+        return { id: 'a', projectId: 'p1', deletedAt: null, title: 'Dep' };
+      if (id === 'b')
+        return { id: 'b', projectId: 'p1', deletedAt: null, title: 'Block' };
+      return null;
+    });
+    prisma.taskDependency.create.mockResolvedValue({});
+
+    await service.addDependency('u1', 'a', { blockingTaskId: 'b', lagDays: 3 });
+
+    expect(prisma.taskDependency.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ lagDays: 3 }),
+      }),
+    );
+  });
+
+  it('addDependency rejects invalid lagDays', async () => {
+    prisma.task.findUnique.mockImplementation((args: { where: { id: string } }) => {
+      const id = args.where.id;
+      if (id === 'a')
+        return { id: 'a', projectId: 'p1', deletedAt: null, title: 'A' };
+      if (id === 'b')
+        return { id: 'b', projectId: 'p1', deletedAt: null, title: 'B' };
+      return null;
+    });
+
+    await expect(
+      service.addDependency('u1', 'a', { blockingTaskId: 'b', lagDays: 1.5 as unknown as number }),
+    ).rejects.toThrow('whole number');
+  });
+
+  it('updateDependencyLag updates row and returns task', async () => {
+    prisma.task.findUnique.mockImplementation((args: any) => {
+      if (args.include?.dependencies !== undefined) {
+        return minimalDetailRow({ id: 'a' });
+      }
+      return { id: 'a', projectId: 'p1', deletedAt: null, title: 'A' };
+    });
+    prisma.taskDependency.update.mockResolvedValue({});
+
+    await service.updateDependencyLag('u1', 'a', 'b', { lagDays: -1 });
+
+    expect(prisma.taskDependency.update).toHaveBeenCalledWith({
+      where: { dependentId_blockingId: { dependentId: 'a', blockingId: 'b' } },
+      data: { lagDays: -1 },
+    });
   });
 
   it('removeDependency maps missing row to NotFound', async () => {

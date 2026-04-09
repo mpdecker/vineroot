@@ -1,5 +1,5 @@
 import { Test } from '@nestjs/testing';
-import { INestApplication, CanActivate } from '@nestjs/common';
+import { INestApplication, CanActivate, ValidationPipe } from '@nestjs/common';
 import request from 'supertest';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
@@ -13,6 +13,8 @@ describe('AuthController (HTTP)', () => {
     refreshToken: jest.fn(),
     logout: jest.fn(),
     getCurrentUser: jest.fn(),
+    updateProfile: jest.fn(),
+    changePassword: jest.fn(),
   };
 
   const allowGuard: CanActivate = {
@@ -34,6 +36,13 @@ describe('AuthController (HTTP)', () => {
       .compile();
 
     app = moduleRef.createNestApplication();
+    app.useGlobalPipes(
+      new ValidationPipe({
+        whitelist: true,
+        forbidNonWhitelisted: true,
+        transform: true,
+      }),
+    );
     await app.init();
   });
 
@@ -100,5 +109,50 @@ describe('AuthController (HTTP)', () => {
 
     await request(app.getHttpServer()).get('/api/v1/auth/me').expect(200);
     expect(authService.getCurrentUser).toHaveBeenCalledWith('user-1');
+  });
+
+  it('PATCH /api/v1/auth/me forwards body to updateProfile', async () => {
+    authService.updateProfile.mockResolvedValue({
+      id: 'user-1',
+      email: 'a@b.com',
+      displayName: 'Renamed',
+      isAgent: false,
+      timezone: 'UTC',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    await request(app.getHttpServer())
+      .patch('/api/v1/auth/me')
+      .send({ displayName: 'Renamed' })
+      .expect(200);
+
+    expect(authService.updateProfile).toHaveBeenCalledWith('user-1', {
+      displayName: 'Renamed',
+    });
+  });
+
+  it('POST /api/v1/auth/me/password forwards to changePassword', async () => {
+    authService.changePassword.mockResolvedValue({ success: true });
+
+    await request(app.getHttpServer())
+      .post('/api/v1/auth/me/password')
+      .send({ currentPassword: 'old', newPassword: 'newpass1234' })
+      .expect(201);
+
+    expect(authService.changePassword).toHaveBeenCalledWith(
+      'user-1',
+      'old',
+      'newpass1234',
+    );
+  });
+
+  it('POST /api/v1/auth/me/password returns 400 when new password too short', async () => {
+    await request(app.getHttpServer())
+      .post('/api/v1/auth/me/password')
+      .send({ currentPassword: 'old', newPassword: 'short' })
+      .expect(400);
+
+    expect(authService.changePassword).not.toHaveBeenCalled();
   });
 });

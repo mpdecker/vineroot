@@ -2,12 +2,12 @@ import {
   Controller,
   Post,
   Get,
+  Patch,
   Body,
   UseGuards,
   Request,
-  Res,
+  NotFoundException,
 } from '@nestjs/common';
-import { Response } from 'express';
 import { AuthService } from './auth.service';
 import { JwtAuthGuard } from './guards';
 import {
@@ -16,7 +16,9 @@ import {
   RefreshTokenRequest,
   AuthResponse,
   AuthUser,
+  UserDto,
 } from '@vineroot/shared-types';
+import { UpdateProfileDto, ChangePasswordDto } from './auth.dto';
 
 @Controller('api/v1/auth')
 export class AuthController {
@@ -49,8 +51,30 @@ export class AuthController {
   async getCurrentUser(@Request() req: any): Promise<AuthUser> {
     const user = await this.authService.getCurrentUser(req.user.userId);
     if (!user) {
-      throw new Error('User not found');
+      throw new NotFoundException('User not found');
     }
     return user;
+  }
+
+  @Patch('me')
+  @UseGuards(JwtAuthGuard)
+  async updateProfile(
+    @Request() req: any,
+    @Body() body: UpdateProfileDto,
+  ): Promise<UserDto> {
+    return this.authService.updateProfile(req.user.userId, body);
+  }
+
+  @Post('me/password')
+  @UseGuards(JwtAuthGuard)
+  async changePassword(
+    @Request() req: any,
+    @Body() body: ChangePasswordDto,
+  ): Promise<{ success: boolean }> {
+    return this.authService.changePassword(
+      req.user.userId,
+      body.currentPassword,
+      body.newPassword,
+    );
   }
 }

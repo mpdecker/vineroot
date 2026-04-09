@@ -2,6 +2,7 @@ import {
   Injectable,
   UnauthorizedException,
   ConflictException,
+  BadRequestException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
@@ -17,6 +18,7 @@ import {
   ActorTier,
 } from '@vineroot/shared-types';
 import { randomBytes } from 'crypto';
+import { Prisma } from '@prisma/client';
 
 @Injectable()
 export class AuthService {
@@ -145,6 +147,97 @@ export class AuthService {
     });
   }
 
+  async updateProfile(
+    userId: string,
+    req: {
+      displayName?: string;
+      timezone?: string;
+      workCalendarId?: string | null;
+      resourceStandardRatePerHour?: number | null;
+      resourceOvertimeRatePerHour?: number | null;
+    },
+  ): Promise<UserDto> {
+    const data: {
+      displayName?: string;
+      timezone?: string;
+      workCalendarId?: string | null;
+      resourceStandardRatePerHour?: Prisma.Decimal | null;
+      resourceOvertimeRatePerHour?: Prisma.Decimal | null;
+    } = {};
+    if (req.displayName !== undefined) data.displayName = req.displayName.trim();
+    if (req.timezone !== undefined) data.timezone = req.timezone.trim();
+
+    if (req.workCalendarId !== undefined) {
+      if (req.workCalendarId === null) {
+        data.workCalendarId = null;
+      } else {
+        const cal = await this.prisma.workCalendar.findFirst({
+          where: {
+            id: req.workCalendarId,
+            workspace: { members: { some: { userId } } },
+          },
+        });
+        if (!cal) {
+          throw new BadRequestException(
+            'workCalendarId must be a calendar in a workspace you belong to',
+          );
+        }
+        data.workCalendarId = cal.id;
+      }
+    }
+
+    if (req.resourceStandardRatePerHour !== undefined) {
+      data.resourceStandardRatePerHour =
+        req.resourceStandardRatePerHour === null
+          ? null
+          : new Prisma.Decimal(req.resourceStandardRatePerHour);
+    }
+    if (req.resourceOvertimeRatePerHour !== undefined) {
+      data.resourceOvertimeRatePerHour =
+        req.resourceOvertimeRatePerHour === null
+          ? null
+          : new Prisma.Decimal(req.resourceOvertimeRatePerHour);
+    }
+
+    if (Object.keys(data).length === 0) {
+      const user = await this.prisma.user.findUnique({ where: { id: userId } });
+      if (!user) throw new UnauthorizedException();
+      return this.userToDto(user);
+    }
+
+    const user = await this.prisma.user.update({
+      where: { id: userId },
+      data,
+    });
+    return this.userToDto(user);
+  }
+
+  async changePassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<{ success: boolean }> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+    });
+    if (!user) {
+      throw new UnauthorizedException();
+    }
+
+    const ok = await bcrypt.compare(currentPassword, user.passwordHash);
+    if (!ok) {
+      throw new BadRequestException('Current password is incorrect');
+    }
+
+    const hashed = await bcrypt.hash(newPassword, 10);
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { passwordHash: hashed },
+    });
+
+    return { success: true };
+  }
+
   async getCurrentUser(userId: string): Promise<AuthUser | null> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -221,6 +314,15 @@ export class AuthService {
       isAgent: user.isAgent,
       agentTier: user.agentTier,
       timezone: user.timezone,
+      workCalendarId: user.workCalendarId ?? null,
+      resourceStandardRatePerHour:
+        user.resourceStandardRatePerHour != null
+          ? Number(user.resourceStandardRatePerHour)
+          : null,
+      resourceOvertimeRatePerHour:
+        user.resourceOvertimeRatePerHour != null
+          ? Number(user.resourceOvertimeRatePerHour)
+          : null,
       createdAt: user.createdAt,
       updatedAt: user.updatedAt,
     };

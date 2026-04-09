@@ -7,9 +7,11 @@ import {
   useCreateGoal,
   useDeleteGoal,
   useCreateGoalMetric,
+  useRecomputeGoalMetric,
 } from '../../hooks/useGoals';
 import { CreateGoalModal } from '../../components/goals/CreateGoalModal';
 import { Button } from '../../components/ui';
+import type { GoalMetricDefinition } from '@vineroot/shared-types';
 import { GoalMetricType } from '@vineroot/shared-types';
 
 export default function GoalsPage() {
@@ -19,10 +21,13 @@ export default function GoalsPage() {
   const { mutate: createGoal, isPending: creating } = useCreateGoal(wid);
   const { mutate: deleteGoal } = useDeleteGoal(wid);
   const { mutate: addMetric, isPending: addingMetric } = useCreateGoalMetric(wid);
+  const { mutate: recomputeMetric, isPending: recomputing } = useRecomputeGoalMetric(wid);
   const [createOpen, setCreateOpen] = useState(false);
   const [metricGoalId, setMetricGoalId] = useState<string | null>(null);
   const [metricName, setMetricName] = useState('');
   const [metricTarget, setMetricTarget] = useState('100');
+  const [metricDefinitionJson, setMetricDefinitionJson] = useState('');
+  const [metricDefError, setMetricDefError] = useState('');
 
   if (!currentWorkspace) {
     return (
@@ -95,14 +100,39 @@ export default function GoalsPage() {
                     {g.metrics.map((m) => (
                       <li
                         key={m.id}
-                        className="flex items-center justify-between text-sm bg-gray-50 rounded-lg px-3 py-2"
+                        className="flex flex-col gap-1 text-sm bg-gray-50 rounded-lg px-3 py-2"
                       >
-                        <span className="font-medium text-gray-800">{m.name}</span>
-                        <span className="text-gray-600">
-                          {m.current} / {m.target}
-                          {m.unit ? ` ${m.unit}` : ''}
-                          <span className="text-gray-400 ml-2">({m.type})</span>
-                        </span>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium text-gray-800">{m.name}</span>
+                          <span className="text-gray-600 shrink-0">
+                            {m.current} / {m.target}
+                            {m.unit ? ` ${m.unit}` : ''}
+                            <span className="text-gray-400 ml-2">({m.type})</span>
+                          </span>
+                        </div>
+                        {m.definition && (
+                          <div className="flex flex-wrap items-center gap-2 text-xs">
+                            <span className="rounded bg-brand-50 text-brand-800 px-1.5 py-0.5">
+                              Computed · {m.definition.kind}
+                            </span>
+                            {m.lastComputedAt && (
+                              <span className="text-gray-500">
+                                Updated {format(new Date(m.lastComputedAt), 'MMM d, HH:mm')}
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              className="text-brand-600 hover:underline disabled:opacity-50"
+                              disabled={recomputing}
+                              onClick={() => recomputeMetric(m.id)}
+                            >
+                              Recompute now
+                            </button>
+                          </div>
+                        )}
+                        {m.lastError && (
+                          <p className="text-xs text-red-600">{m.lastError}</p>
+                        )}
                       </li>
                     ))}
                   </ul>
@@ -115,18 +145,33 @@ export default function GoalsPage() {
                     className="flex flex-wrap items-end gap-2"
                     onSubmit={(e) => {
                       e.preventDefault();
+                      setMetricDefError('');
                       const t = parseFloat(metricTarget);
                       if (!metricName.trim() || Number.isNaN(t)) return;
+                      let definition: GoalMetricDefinition | undefined;
+                      if (metricDefinitionJson.trim()) {
+                        try {
+                          definition = JSON.parse(
+                            metricDefinitionJson,
+                          ) as GoalMetricDefinition;
+                        } catch {
+                          setMetricDefError('Definition must be valid JSON.');
+                          return;
+                        }
+                      }
                       addMetric({
                         goalId: g.id,
                         body: {
                           name: metricName.trim(),
-                          type: GoalMetricType.PERCENT,
+                          type: definition ? GoalMetricType.NUMBER : GoalMetricType.PERCENT,
                           target: t,
+                          ...(definition ? { definition } : {}),
                         },
                       });
                       setMetricName('');
                       setMetricTarget('100');
+                      setMetricDefinitionJson('');
+                      setMetricDefError('');
                       setMetricGoalId(null);
                     }}
                   >
@@ -142,6 +187,16 @@ export default function GoalsPage() {
                       onChange={(e) => setMetricTarget(e.target.value)}
                       className="w-24 border border-gray-200 rounded-lg px-2 py-1.5 text-sm"
                     />
+                    <textarea
+                      value={metricDefinitionJson}
+                      onChange={(e) => setMetricDefinitionJson(e.target.value)}
+                      placeholder='Optional JSON definition, e.g. {"kind":"TASK_COUNT","statuses":["DONE"],"period":{"preset":"CURRENT_QUARTER"}}'
+                      rows={2}
+                      className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-xs font-mono"
+                    />
+                    {metricDefError && (
+                      <p className="text-xs text-red-600 w-full">{metricDefError}</p>
+                    )}
                     <Button type="submit" size="sm" disabled={addingMetric}>
                       Add
                     </Button>

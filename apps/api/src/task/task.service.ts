@@ -3,10 +3,12 @@ import {
   ActorTier,
   AuditEventType,
   AutomationTriggerType,
+  CustomFieldComputedKind,
   DependencyType,
   KanbanWipEnforcement,
   Prisma,
   ReviewGate,
+  ScheduleLinkType,
   TaskComplexity,
   TaskDomain,
   TaskPriority,
@@ -20,18 +22,56 @@ import { AutomationService } from '../automation/automation.service';
 import { TaskActivityLogService } from '../activity-log/task-activity-log.service';
 import {
   TaskDto,
+  TaskScheduleSegmentDto,
   CreateTaskRequest,
   UpdateTaskRequest,
   ReorderTasksRequest,
   AddTaskDependencyRequest,
+  UpdateTaskDependencyLagRequest,
+  UpdateTaskDependencyScheduleRequest,
   CreateTaskAttachmentRequest,
   DuplicateTaskRequest,
   CustomFieldType,
+  AddTaskGenericResourceAssignmentRequest,
+  PatchTaskGenericResourceAssignmentRequest,
+  AddTaskAssigneeRequest,
+  PatchTaskAssigneeRequest,
+  CreateTaskCostEntryRequest,
+  TaskCostEntryDto,
+  UpdateTaskCostEntryRequest,
+  TaskWorkContour,
 } from '@vineroot/shared-types';
 import { AttachmentService } from '../attachment/attachment.service';
 import { isCustomFieldValueEmpty } from '../custom-field/custom-field-value.validation';
+import { CustomFieldRollupService } from '../custom-field/custom-field-rollup.service';
 import { refreshPmSnapshotsForProjectTask } from '../project/project-pm-snapshots.util';
 import { OutboundWebhookService } from '../outbound-webhook/outbound-webhook.service';
+import { GoalMetricComputeService } from '../goal/goal-metric-compute.service';
+
+const LAG_DAYS_MIN = -10_000;
+const LAG_DAYS_MAX = 10_000;
+const ASSIGNMENT_UNITS_MAX = 10_000;
+
+function parseScheduleLinkType(raw: unknown): ScheduleLinkType {
+  if (raw === undefined || raw === null) return ScheduleLinkType.FS;
+  const s = String(raw);
+  if (s === 'FS' || s === 'SS' || s === 'FF' || s === 'SF') {
+    return s as ScheduleLinkType;
+  }
+  throw new BadRequestException('linkType must be FS, SS, FF, or SF');
+}
+
+function normalizeLagDays(raw: unknown): number {
+  if (raw === undefined || raw === null) return 0;
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n)) {
+    throw new BadRequestException('lagDays must be a whole number');
+  }
+  if (n < LAG_DAYS_MIN || n > LAG_DAYS_MAX) {
+    throw new BadRequestException(`lagDays must be between ${LAG_DAYS_MIN} and ${LAG_DAYS_MAX}`);
+  }
+  return n;
+}
 
 /** Nested subtasks up to 4 levels for task detail (each level loads custom fields). */
 function subtaskDetailInclude(depth: number): Record<string, unknown> {
@@ -51,6 +91,19 @@ function subtaskDetailInclude(depth: number): Record<string, unknown> {
 
 const SUBTASK_DETAIL_INCLUDE = subtaskDetailInclude(4);
 
+async function resolveTaskPrimaryWorkspaceId(
+  prisma: PrismaService,
+  task: { workspaceId: string | null; projectId: string | null },
+): Promise<string | null> {
+  if (task.workspaceId) return task.workspaceId;
+  if (!task.projectId) return null;
+  const link = await prisma.projectWorkspace.findFirst({
+    where: { projectId: task.projectId },
+    orderBy: { joinedAt: 'asc' },
+  });
+  return link?.workspaceId ?? null;
+}
+
 @Injectable()
 export class TaskService {
   constructor(
@@ -60,6 +113,8 @@ export class TaskService {
     private taskActivityLog: TaskActivityLogService,
     private attachmentService: AttachmentService,
     private outboundWebhookService: OutboundWebhookService,
+    private goalMetricCompute: GoalMetricComputeService,
+    private customFieldRollupService: CustomFieldRollupService,
   ) {}
 
   async create(
@@ -176,6 +231,58 @@ export class TaskService {
         parallelGroup: req.parallelGroup,
         agentContext: req.agentContext === undefined ? undefined : (req.agentContext as object),
         isMilestone: req.isMilestone ?? false,
+        isManuallyScheduled:
+          req.isManuallyScheduled !== undefined
+            ? req.isManuallyScheduled
+            : project.defaultManualSchedule,
+        constraintType: req.constraintType,
+        constraintDate: req.constraintDate ?? undefined,
+        deadlineDate: req.deadlineDate ?? undefined,
+        durationWorkingMinutes: req.durationWorkingMinutes ?? undefined,
+        workMinutes: req.workMinutes ?? undefined,
+        scheduleMode: req.scheduleMode,
+        ...(req.effortDriven !== undefined
+          ? { effortDriven: req.effortDriven }
+          : {}),
+        ...(req.isSummaryRollup !== undefined
+          ? { isSummaryRollup: req.isSummaryRollup }
+          : {}),
+        ...(req.levelingPriority !== undefined
+          ? {
+              levelingPriority: this.normalizeLevelingPriority(req.levelingPriority),
+            }
+          : {}),
+        ...(req.levelingCanSplit !== undefined
+          ? { levelingCanSplit: Boolean(req.levelingCanSplit) }
+          : {}),
+        ...(await this.resolveTaskWorkCalendarCreateData(
+          project,
+          req.workCalendarId,
+        )),
+        percentComplete: req.percentComplete,
+        fixedCost: req.fixedCost ?? undefined,
+        actualCost:
+          req.actualCost === undefined
+            ? undefined
+            : req.actualCost === null
+              ? null
+              : new Prisma.Decimal(req.actualCost),
+        ...(req.overtimeWorkMinutes != null
+          ? { overtimeWorkMinutes: req.overtimeWorkMinutes }
+          : {}),
+        ...(req.isBudgetTask !== undefined
+          ? { isBudgetTask: Boolean(req.isBudgetTask) }
+          : {}),
+        ...(req.scheduleSegments !== undefined && req.scheduleSegments !== null
+          ? {
+              scheduleSegments: this.normalizeScheduleSegmentsInput(
+                req.scheduleSegments,
+              ) as Prisma.InputJsonValue,
+            }
+          : {}),
+        ...(req.workContour !== undefined
+          ? { workContour: this.normalizeWorkContour(req.workContour) }
+          : {}),
       },
       include: {
         assignees: { include: { user: true } },
@@ -198,6 +305,9 @@ export class TaskService {
         action: 'created',
       });
     }
+    this.scheduleGoalMetricRecompute(
+      project.workspaceLinks.map((l) => l.workspaceId),
+    );
 
     await this.automationService.evaluate(
       task.id,
@@ -263,6 +373,11 @@ export class TaskService {
     }
     if (req.sprintId) {
       throw new BadRequestException('Sprint can only be assigned to project tasks');
+    }
+    if (req.workCalendarId != null) {
+      throw new BadRequestException(
+        'workCalendarId can only be set when creating a project task',
+      );
     }
 
     let assigneeIds: string[];
@@ -331,6 +446,7 @@ export class TaskService {
       task: this.taskToDto(task),
       action: 'created',
     });
+    this.scheduleGoalMetricRecompute([workspaceId]);
 
     await this.automationService.evaluate(
       task.id,
@@ -376,6 +492,7 @@ export class TaskService {
       },
       include: {
         assignees: { include: { user: true } },
+        genericResourceAssignments: { include: { genericResource: true } },
         tags: { include: { tag: true } },
         subtasks: true,
         createdBy: true,
@@ -385,7 +502,171 @@ export class TaskService {
       orderBy: { sortOrder: 'asc' },
     });
 
-    return tasks.map((t) => this.taskToDto(t));
+    const wbsRows = await this.prisma.task.findMany({
+      where: { projectId, deletedAt: null, isTemplate: false },
+      select: { id: true, parentTaskId: true, sortOrder: true },
+    });
+    const wbsMap = this.computeWbsOutlineMap(
+      Array.isArray(wbsRows) ? wbsRows : [],
+    );
+    return tasks.map((t) => this.taskToDto(t, wbsMap));
+  }
+
+  private async assertProjectAndTask(
+    projectId: string,
+    taskId: string,
+    userId: string,
+  ): Promise<void> {
+    const p = await this.prisma.project.findFirst({
+      where: {
+        id: projectId,
+        deletedAt: null,
+        OR: [{ createdById: userId }, { members: { some: { userId } } }],
+      },
+      select: { id: true },
+    });
+    if (!p) throw new NotFoundException('Project not found');
+    const t = await this.prisma.task.findFirst({
+      where: { id: taskId, projectId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!t) throw new NotFoundException('Task not found');
+  }
+
+  async listTaskCostEntries(
+    projectId: string,
+    taskId: string,
+    actorId: string,
+  ): Promise<TaskCostEntryDto[]> {
+    await this.assertProjectAndTask(projectId, taskId, actorId);
+    const rows = await this.prisma.taskCostEntry.findMany({
+      where: { taskId },
+      orderBy: [{ entryDate: 'desc' }, { createdAt: 'desc' }],
+    });
+    return rows.map((r) => ({
+      id: r.id,
+      taskId: r.taskId,
+      amount: Number(r.amount),
+      description: r.description,
+      entryDate: r.entryDate.toISOString(),
+      createdAt: r.createdAt.toISOString(),
+      createdById: r.createdById,
+    }));
+  }
+
+  async createTaskCostEntry(
+    projectId: string,
+    taskId: string,
+    actorId: string,
+    body: CreateTaskCostEntryRequest,
+  ): Promise<TaskCostEntryDto> {
+    await this.assertProjectAndTask(projectId, taskId, actorId);
+    const amt = Number(body.amount);
+    if (!Number.isFinite(amt) || amt < 0) {
+      throw new BadRequestException('amount must be a non-negative number');
+    }
+    const entryDate =
+      body.entryDate != null && String(body.entryDate).trim() !== ''
+        ? new Date(body.entryDate as string)
+        : new Date();
+    if (Number.isNaN(entryDate.getTime())) {
+      throw new BadRequestException('entryDate must be a valid date');
+    }
+    const row = await this.prisma.taskCostEntry.create({
+      data: {
+        taskId,
+        amount: new Prisma.Decimal(amt),
+        description:
+          body.description != null && String(body.description).trim() !== ''
+            ? String(body.description).trim()
+            : null,
+        entryDate,
+        createdById: actorId,
+      },
+    });
+    return {
+      id: row.id,
+      taskId: row.taskId,
+      amount: Number(row.amount),
+      description: row.description,
+      entryDate: row.entryDate.toISOString(),
+      createdAt: row.createdAt.toISOString(),
+      createdById: row.createdById,
+    };
+  }
+
+  async patchTaskCostEntry(
+    projectId: string,
+    taskId: string,
+    entryId: string,
+    actorId: string,
+    body: UpdateTaskCostEntryRequest,
+  ): Promise<TaskCostEntryDto> {
+    await this.assertProjectAndTask(projectId, taskId, actorId);
+    const prev = await this.prisma.taskCostEntry.findFirst({
+      where: { id: entryId, taskId },
+    });
+    if (!prev) throw new NotFoundException('Cost entry not found');
+    if (
+      body.amount === undefined &&
+      body.description === undefined &&
+      body.entryDate === undefined
+    ) {
+      throw new BadRequestException(
+        'Provide at least one of amount, description, entryDate',
+      );
+    }
+    const data: Prisma.TaskCostEntryUpdateInput = {};
+    if (body.amount !== undefined) {
+      const amt = Number(body.amount);
+      if (!Number.isFinite(amt) || amt < 0) {
+        throw new BadRequestException('amount must be a non-negative number');
+      }
+      data.amount = new Prisma.Decimal(amt);
+    }
+    if (body.description !== undefined) {
+      data.description =
+        body.description === null || String(body.description).trim() === ''
+          ? null
+          : String(body.description).trim();
+    }
+    if (body.entryDate !== undefined) {
+      const raw = String(body.entryDate).trim();
+      if (raw === '') {
+        throw new BadRequestException('entryDate cannot be empty');
+      }
+      const d = new Date(raw);
+      if (Number.isNaN(d.getTime())) {
+        throw new BadRequestException('entryDate must be a valid date');
+      }
+      data.entryDate = d;
+    }
+    const row = await this.prisma.taskCostEntry.update({
+      where: { id: entryId },
+      data,
+    });
+    return {
+      id: row.id,
+      taskId: row.taskId,
+      amount: Number(row.amount),
+      description: row.description,
+      entryDate: row.entryDate.toISOString(),
+      createdAt: row.createdAt.toISOString(),
+      createdById: row.createdById,
+    };
+  }
+
+  async deleteTaskCostEntry(
+    projectId: string,
+    taskId: string,
+    entryId: string,
+    actorId: string,
+  ): Promise<void> {
+    await this.assertProjectAndTask(projectId, taskId, actorId);
+    const res = await this.prisma.taskCostEntry.deleteMany({
+      where: { id: entryId, taskId },
+    });
+    if (res.count === 0) throw new NotFoundException('Cost entry not found');
   }
 
   async listMyTasks(userId: string): Promise<TaskDto[]> {
@@ -414,6 +695,7 @@ export class TaskService {
       where: { id },
       include: {
         assignees: { include: { user: true } },
+        genericResourceAssignments: { include: { genericResource: true } },
         tags: { include: { tag: true } },
         subtasks: SUBTASK_DETAIL_INCLUDE,
         createdBy: true,
@@ -431,7 +713,57 @@ export class TaskService {
     });
 
     if (!task || task.deletedAt) return null;
-    return this.taskToDto(task);
+    if (task.projectId) {
+      await this.customFieldRollupService.mergeRollupsForTaskDetailTree(task);
+    }
+    let wbsMap: Map<string, string> | undefined;
+    if (task.projectId) {
+      const wbsRows = await this.prisma.task.findMany({
+        where: {
+          projectId: task.projectId,
+          deletedAt: null,
+          isTemplate: false,
+        },
+        select: { id: true, parentTaskId: true, sortOrder: true },
+      });
+      wbsMap = this.computeWbsOutlineMap(
+        Array.isArray(wbsRows) ? wbsRows : [],
+      );
+    }
+    return this.taskToDto(task, wbsMap);
+  }
+
+  private async assertTasksAllowDependency(
+    dependent: { projectId: string | null },
+    blocking: { projectId: string | null },
+  ): Promise<void> {
+    if (!dependent.projectId || !blocking.projectId) {
+      throw new BadRequestException(
+        'Dependencies require both tasks to belong to a project',
+      );
+    }
+    if (dependent.projectId === blocking.projectId) return;
+    const rows = await this.prisma.scheduleProgramProject.findMany({
+      where: {
+        projectId: { in: [dependent.projectId, blocking.projectId] },
+      },
+    });
+    const byProg = new Map<string, Set<string>>();
+    for (const r of rows) {
+      if (!byProg.has(r.programId)) byProg.set(r.programId, new Set());
+      byProg.get(r.programId)!.add(r.projectId);
+    }
+    for (const set of byProg.values()) {
+      if (
+        set.has(dependent.projectId) &&
+        set.has(blocking.projectId)
+      ) {
+        return;
+      }
+    }
+    throw new BadRequestException(
+      'Dependencies must be same project or both projects in one schedule program',
+    );
   }
 
   async addDependency(
@@ -453,15 +785,18 @@ export class TaskService {
     if (!blocking || blocking.deletedAt) {
       throw new NotFoundException('Blocking task not found');
     }
-    if (!dependent.projectId || dependent.projectId !== blocking.projectId) {
-      throw new BadRequestException('Dependencies must be between tasks in the same project');
-    }
+    await this.assertTasksAllowDependency(dependent, blocking);
+    const lagDays = normalizeLagDays(body.lagDays);
+    const linkType = parseScheduleLinkType(body.linkType);
     try {
       await this.prisma.taskDependency.create({
         data: {
           dependentId,
           blockingId,
           type: body.type ?? DependencyType.WAITING_ON,
+          linkType,
+          lagDays,
+          lagIsElapsed: body.lagIsElapsed === true,
         },
       });
     } catch (e: any) {
@@ -476,7 +811,68 @@ export class TaskService {
       projectId: dependent.projectId,
       eventType: AuditEventType.TASK_UPDATED,
       description: `Now waiting on "${blocking.title}"`,
-      newValue: { blockingTaskId: blockingId },
+      newValue: { blockingTaskId: blockingId, lagDays, linkType },
+    });
+    const updated = await this.findById(dependentId);
+    if (!updated) throw new NotFoundException('Task not found');
+    await this.emitTaskUpdatedSocket(updated);
+    return updated;
+  }
+
+  async updateDependencyLag(
+    userId: string,
+    dependentId: string,
+    blockingId: string,
+    body: UpdateTaskDependencyLagRequest | UpdateTaskDependencyScheduleRequest,
+  ): Promise<TaskDto> {
+    const lagDays =
+      body.lagDays !== undefined ? normalizeLagDays(body.lagDays) : undefined;
+    const sch = body as UpdateTaskDependencyScheduleRequest;
+    const linkType =
+      sch.linkType !== undefined
+        ? parseScheduleLinkType(sch.linkType)
+        : undefined;
+    const lagIsElapsed = sch.lagIsElapsed;
+    if (
+      lagDays === undefined &&
+      linkType === undefined &&
+      lagIsElapsed === undefined
+    ) {
+      throw new BadRequestException(
+        'Provide lagDays, linkType, and/or lagIsElapsed',
+      );
+    }
+    const dependent = await this.prisma.task.findUnique({ where: { id: dependentId } });
+    if (!dependent || dependent.deletedAt) {
+      throw new NotFoundException('Task not found');
+    }
+    try {
+      await this.prisma.taskDependency.update({
+        where: { dependentId_blockingId: { dependentId, blockingId } },
+        data: {
+          ...(lagDays !== undefined && { lagDays }),
+          ...(linkType !== undefined && { linkType }),
+          ...(lagIsElapsed !== undefined && { lagIsElapsed }),
+        },
+      });
+    } catch (e: any) {
+      if (e?.code === 'P2025') {
+        throw new NotFoundException('Dependency not found');
+      }
+      throw e;
+    }
+    await this.taskActivityLog.log({
+      actorId: userId,
+      taskId: dependentId,
+      projectId: dependent.projectId,
+      eventType: AuditEventType.TASK_UPDATED,
+      description:
+        lagDays !== undefined && linkType !== undefined
+          ? `Dependency lag/link updated`
+          : lagDays !== undefined
+            ? `Dependency lag set to ${lagDays} day(s)`
+            : `Dependency link type updated`,
+      newValue: { blockingTaskId: blockingId, lagDays, linkType },
     });
     const updated = await this.findById(dependentId);
     if (!updated) throw new NotFoundException('Task not found');
@@ -653,7 +1049,152 @@ export class TaskService {
     if (req.backlogRank !== undefined) {
       data.backlogRank = req.backlogRank;
     }
+    if (req.isManuallyScheduled !== undefined) {
+      data.isManuallyScheduled = req.isManuallyScheduled;
+    }
+    if (req.constraintType !== undefined) {
+      data.constraintType = req.constraintType;
+    }
+    if (req.constraintDate !== undefined) {
+      data.constraintDate =
+        req.constraintDate === null
+          ? null
+          : req.constraintDate instanceof Date
+            ? req.constraintDate
+            : new Date(req.constraintDate as string | number);
+    }
+    if (req.deadlineDate !== undefined) {
+      data.deadlineDate =
+        req.deadlineDate === null
+          ? null
+          : req.deadlineDate instanceof Date
+            ? req.deadlineDate
+            : new Date(req.deadlineDate as string | number);
+    }
+    if (req.durationWorkingMinutes !== undefined) {
+      data.durationWorkingMinutes = req.durationWorkingMinutes;
+    }
+    if (req.workMinutes !== undefined) {
+      data.workMinutes = req.workMinutes;
+    }
+    if (req.scheduleMode !== undefined) {
+      data.scheduleMode = req.scheduleMode;
+    }
+    if (req.effortDriven !== undefined) {
+      data.effortDriven = req.effortDriven;
+    }
+    if (req.isSummaryRollup !== undefined) {
+      data.isSummaryRollup = req.isSummaryRollup;
+    }
+    if (req.percentComplete !== undefined) {
+      data.percentComplete = req.percentComplete;
+    }
+    if (req.fixedCost !== undefined) {
+      data.fixedCost = req.fixedCost;
+    }
+    if (req.actualCost !== undefined) {
+      data.actualCost =
+        req.actualCost === null ? null : new Prisma.Decimal(req.actualCost);
+    }
+    if (req.overtimeWorkMinutes !== undefined) {
+      if (req.overtimeWorkMinutes === null) {
+        data.overtimeWorkMinutes = null;
+      } else {
+        const n = Math.round(Number(req.overtimeWorkMinutes));
+        if (!Number.isFinite(n) || n < 0) {
+          throw new BadRequestException(
+            'overtimeWorkMinutes must be null or a non-negative integer',
+          );
+        }
+        data.overtimeWorkMinutes = n;
+      }
+    }
+    if (req.isBudgetTask !== undefined) {
+      data.isBudgetTask = Boolean(req.isBudgetTask);
+    }
+    if (req.scheduleSegments !== undefined) {
+      data.scheduleSegments =
+        req.scheduleSegments === null
+          ? Prisma.JsonNull
+          : (this.normalizeScheduleSegmentsInput(
+              req.scheduleSegments,
+            ) as Prisma.InputJsonValue);
+    }
+    if (req.workContour !== undefined) {
+      data.workContour = this.normalizeWorkContour(req.workContour);
+    }
+    if (req.levelingPriority !== undefined) {
+      data.levelingPriority = this.normalizeLevelingPriority(req.levelingPriority);
+    }
+    if (req.levelingCanSplit !== undefined) {
+      data.levelingCanSplit = Boolean(req.levelingCanSplit);
+    }
     return data;
+  }
+
+  private normalizeLevelingPriority(raw: unknown): number {
+    const n = Math.round(Number(raw));
+    if (!Number.isFinite(n) || n < 0 || n > 1000) {
+      throw new BadRequestException('levelingPriority must be an integer from 0 to 1000');
+    }
+    return n;
+  }
+
+  private readonly workContourValues = new Set<string>(Object.values(TaskWorkContour));
+
+  private normalizeWorkContour(raw: unknown): TaskWorkContour {
+    if (typeof raw !== 'string' || !this.workContourValues.has(raw)) {
+      throw new BadRequestException('workContour is not a valid TaskWorkContour value');
+    }
+    return raw as TaskWorkContour;
+  }
+
+  private scheduleSegmentsToDto(raw: unknown): TaskScheduleSegmentDto[] | null {
+    if (raw == null) return null;
+    if (!Array.isArray(raw)) return null;
+    const out: TaskScheduleSegmentDto[] = [];
+    for (const x of raw) {
+      if (x && typeof x === 'object' && 'start' in x && 'end' in x) {
+        const o = x as Record<string, unknown>;
+        const wm = o.workMinutes;
+        out.push({
+          start: String(o.start),
+          end: String(o.end),
+          workMinutes:
+            wm != null && Number.isFinite(Number(wm)) ? Number(wm) : null,
+        });
+      }
+    }
+    return out.length ? out : null;
+  }
+
+  private normalizeScheduleSegmentsInput(
+    segs: TaskScheduleSegmentDto[],
+  ): Prisma.InputJsonValue {
+    if (!Array.isArray(segs)) {
+      throw new BadRequestException('scheduleSegments must be an array');
+    }
+    const out: { start: string; end: string; workMinutes?: number }[] = [];
+    for (const s of segs) {
+      if (!s || typeof s.start !== 'string' || typeof s.end !== 'string') {
+        throw new BadRequestException(
+          'Each schedule segment requires string start and end',
+        );
+      }
+      const row: { start: string; end: string; workMinutes?: number } = {
+        start: s.start,
+        end: s.end,
+      };
+      if (s.workMinutes != null) {
+        const w = Number(s.workMinutes);
+        if (!Number.isFinite(w)) {
+          throw new BadRequestException('segment workMinutes must be a number');
+        }
+        row.workMinutes = w;
+      }
+      out.push(row);
+    }
+    return out;
   }
 
   private sameInstant(
@@ -983,6 +1524,27 @@ export class TaskService {
     }
 
     const data = this.buildTaskUpdateData(req);
+    if (req.workCalendarId !== undefined) {
+      if (!prior.projectId) {
+        throw new BadRequestException(
+          'workCalendarId can only be set on project tasks',
+        );
+      }
+      const wsIds = await this.workspaceIdsForProject(prior.projectId);
+      if (req.workCalendarId === null) {
+        data.workCalendarId = null;
+      } else {
+        const cal = await this.prisma.workCalendar.findFirst({
+          where: { id: req.workCalendarId, workspaceId: { in: wsIds } },
+        });
+        if (!cal) {
+          throw new BadRequestException(
+            'workCalendarId must reference a work calendar in this project workspace',
+          );
+        }
+        data.workCalendarId = cal.id;
+      }
+    }
     if (req.workItemType === 'EPIC') {
       data.epicTaskId = null;
     }
@@ -1049,6 +1611,7 @@ export class TaskService {
 
     const updateInclude = {
       assignees: { include: { user: true } },
+      genericResourceAssignments: { include: { genericResource: true } },
       tags: { include: { tag: true } },
       subtasks: true,
       createdBy: true,
@@ -1308,6 +1871,7 @@ export class TaskService {
           action: 'updated',
         });
       }
+      this.scheduleGoalMetricRecompute(links.map((l) => l.workspaceId));
     } else if (task.workspaceId) {
       this.eventsGateway.emitToWorkspace(task.workspaceId, 'task:updated', {
         task: dto,
@@ -1317,6 +1881,7 @@ export class TaskService {
         task: dto,
         action: 'updated',
       });
+      this.scheduleGoalMetricRecompute([task.workspaceId]);
     }
 
     await refreshPmSnapshotsForProjectTask(this.prisma, {
@@ -1380,6 +1945,7 @@ export class TaskService {
       where: { id: taskId },
       include: {
         assignees: true,
+        genericResourceAssignments: { include: { genericResource: true } },
         tags: true,
         customFieldValues: true,
       },
@@ -1432,8 +1998,28 @@ export class TaskService {
     const sortOrder = (agg._max.sortOrder ?? -1) + 1;
     const title = (req.title?.trim() || source.title).trim() || source.title;
 
+    const genericCreates =
+      source.genericResourceAssignments
+        ?.filter((x) => x.genericResource.workspaceId === primaryWs)
+        .map((x) => ({
+          genericResourceId: x.genericResourceId,
+          unitsPercent: x.unitsPercent ?? 100,
+          ...(x.costPerUse != null
+            ? { costPerUse: x.costPerUse }
+            : {}),
+        })) ?? [];
+
     if (!source.parentTaskId && sectionId) {
       await this.assertNewRootFitsKanbanWip(targetProjectId, sectionId);
+    }
+
+    let dupWorkCalId: string | null = source.workCalendarId;
+    if (dupWorkCalId && targetProjectId !== source.projectId) {
+      const wsIds = project.workspaceLinks.map((l) => l.workspaceId);
+      const ok = await this.prisma.workCalendar.findFirst({
+        where: { id: dupWorkCalId, workspaceId: { in: wsIds } },
+      });
+      dupWorkCalId = ok?.id ?? null;
     }
 
     let dupSprintId: string | null = null;
@@ -1484,19 +2070,53 @@ export class TaskService {
             ? undefined
             : (source.agentContext as object),
         isTemplate: false,
+        isMilestone: source.isMilestone ?? false,
+        isManuallyScheduled: source.isManuallyScheduled,
+        constraintType: source.constraintType,
+        constraintDate: source.constraintDate,
+        deadlineDate: source.deadlineDate,
+        durationWorkingMinutes: source.durationWorkingMinutes,
+        workMinutes: source.workMinutes,
+        scheduleMode: source.scheduleMode,
+        workCalendarId: dupWorkCalId ?? undefined,
+        effortDriven: source.effortDriven ?? false,
+        isSummaryRollup: source.isSummaryRollup ?? false,
+        levelingPriority: source.levelingPriority ?? undefined,
+        levelingDelayWorkingDays: 0,
+        levelingCanSplit: source.levelingCanSplit ?? false,
+        percentComplete: source.percentComplete,
+        fixedCost: source.fixedCost,
+        actualCost: source.actualCost,
+        overtimeWorkMinutes: source.overtimeWorkMinutes ?? undefined,
+        isBudgetTask: source.isBudgetTask ?? false,
+        workContour: source.workContour ?? undefined,
+        scheduleSegments:
+          source.scheduleSegments === null || source.scheduleSegments === undefined
+            ? undefined
+            : (source.scheduleSegments as Prisma.InputJsonValue),
         assignees:
           source.assignees.length > 0
             ? {
-                create: source.assignees.map((a) => ({ userId: a.userId })),
+                create: source.assignees.map((a) => ({
+                  userId: a.userId,
+                  unitsPercent: a.unitsPercent ?? 100,
+                  ...(a.workMinutes != null ? { workMinutes: a.workMinutes } : {}),
+                  ...(a.costPerUse != null ? { costPerUse: a.costPerUse } : {}),
+                })),
               }
             : undefined,
         tags:
           source.tags.length > 0
             ? { create: source.tags.map((t) => ({ tagId: t.tagId })) }
             : undefined,
+        genericResourceAssignments:
+          genericCreates.length > 0
+            ? { create: genericCreates }
+            : undefined,
       },
       include: {
         assignees: { include: { user: true } },
+        genericResourceAssignments: { include: { genericResource: true } },
         tags: { include: { tag: true } },
         subtasks: true,
         createdBy: true,
@@ -1550,6 +2170,9 @@ export class TaskService {
         action: 'created',
       });
     }
+    this.scheduleGoalMetricRecompute(
+      project.workspaceLinks.map((l) => l.workspaceId),
+    );
     await refreshPmSnapshotsForProjectTask(this.prisma, {
       projectId: targetProjectId,
       sprintIds: [created.sprintId],
@@ -1585,19 +2208,28 @@ export class TaskService {
           action: 'deleted',
         });
       }
+      this.scheduleGoalMetricRecompute(links.map((l) => l.workspaceId));
     } else if (task.workspaceId) {
       this.eventsGateway.emitToWorkspace(task.workspaceId, 'task:deleted', {
         task: dto,
         action: 'deleted',
       });
+      this.scheduleGoalMetricRecompute([task.workspaceId]);
     }
   }
 
   async addAssignee(
     taskId: string,
     actorId: string,
-    assigneeUserId: string,
+    body: AddTaskAssigneeRequest,
   ): Promise<TaskDto> {
+    const assigneeUserId = body.userId;
+    const units = this.normalizeAssignmentUnits(body.unitsPercent, 100);
+    const wmCreate = this.normalizeAssignmentWorkMinutes(body.workMinutes);
+    const costPerUseCreate = this.optionalMoneyField(
+      body.costPerUse,
+      'costPerUse',
+    );
     const prior = await this.prisma.task.findUnique({
       where: { id: taskId },
       include: { assignees: true },
@@ -1616,13 +2248,45 @@ export class TaskService {
 
     try {
       await this.prisma.taskAssignee.create({
-        data: { taskId, userId: assigneeUserId },
+        data: {
+          taskId,
+          userId: assigneeUserId,
+          unitsPercent: units,
+          ...(wmCreate !== undefined ? { workMinutes: wmCreate } : {}),
+          ...(costPerUseCreate !== undefined
+            ? { costPerUse: costPerUseCreate }
+            : {}),
+        },
       });
     } catch (e: any) {
       if (e?.code === 'P2002') {
         throw new BadRequestException('User is already assigned');
       }
       throw e;
+    }
+
+    const afterCreate = await this.prisma.task.findUnique({
+      where: { id: taskId },
+      include: { assignees: true },
+    });
+    if (
+      afterCreate?.effortDriven &&
+      afterCreate.workMinutes != null &&
+      afterCreate.workMinutes > 0 &&
+      afterCreate.assignees.length > 0
+    ) {
+      const n = afterCreate.assignees.length;
+      const total = afterCreate.workMinutes;
+      const base = Math.floor(total / n);
+      let rem = total - base * n;
+      for (const a of afterCreate.assignees) {
+        const add = rem > 0 ? 1 : 0;
+        if (rem > 0) rem -= 1;
+        await this.prisma.taskAssignee.update({
+          where: { taskId_userId: { taskId, userId: a.userId } },
+          data: { workMinutes: base + add },
+        });
+      }
     }
 
     const next = await this.prisma.task.findUnique({
@@ -1649,7 +2313,96 @@ export class TaskService {
       projectId: prior.projectId,
       eventType: AuditEventType.TASK_ASSIGNED,
       description: `Assigned ${assigneeUser.displayName}`,
-      newValue: { assigneeId: assigneeUserId },
+      newValue: {
+        assigneeId: assigneeUserId,
+        unitsPercent: units,
+        ...(wmCreate !== undefined ? { workMinutes: wmCreate } : {}),
+      },
+    });
+
+    const updated = await this.findById(taskId);
+    if (!updated) throw new NotFoundException('Task not found');
+    await this.emitTaskUpdatedSocket(updated);
+    return updated;
+  }
+
+  async patchAssignee(
+    taskId: string,
+    actorId: string,
+    assigneeUserId: string,
+    body: PatchTaskAssigneeRequest,
+  ): Promise<TaskDto> {
+    if (
+      body.unitsPercent === undefined &&
+      body.workMinutes === undefined &&
+      body.costPerUse === undefined
+    ) {
+      throw new BadRequestException(
+        'Provide unitsPercent, workMinutes, and/or costPerUse',
+      );
+    }
+    const prior = await this.prisma.task.findUnique({
+      where: { id: taskId },
+      include: { assignees: true },
+    });
+    if (!prior || prior.deletedAt) {
+      throw new NotFoundException('Task not found');
+    }
+    const prevRow = prior.assignees.find((a) => a.userId === assigneeUserId);
+    const data: Prisma.TaskAssigneeUpdateInput = {};
+    let nextUnits = prevRow?.unitsPercent ?? 100;
+    if (body.unitsPercent !== undefined) {
+      nextUnits = this.normalizeAssignmentUnits(body.unitsPercent, 100);
+      data.unitsPercent = nextUnits;
+    }
+    const wmUpd = this.normalizeAssignmentWorkMinutes(body.workMinutes);
+    let nextWork = prevRow?.workMinutes ?? null;
+    if (wmUpd !== undefined) {
+      data.workMinutes = wmUpd;
+      nextWork = wmUpd;
+    }
+    const cpuUpd = this.optionalMoneyField(body.costPerUse, 'costPerUse');
+    let nextCostPerUse = prevRow?.costPerUse ?? null;
+    if (cpuUpd !== undefined) {
+      data.costPerUse = cpuUpd;
+      nextCostPerUse = cpuUpd;
+    }
+    try {
+      await this.prisma.taskAssignee.update({
+        where: { taskId_userId: { taskId, userId: assigneeUserId } },
+        data,
+      });
+    } catch (e: any) {
+      if (e?.code === 'P2025') {
+        throw new NotFoundException('Assignee not found on this task');
+      }
+      throw e;
+    }
+
+    const assigneeUser = await this.prisma.user.findUnique({
+      where: { id: assigneeUserId },
+      select: { displayName: true },
+    });
+
+    await this.taskActivityLog.log({
+      actorId,
+      taskId,
+      projectId: prior.projectId,
+      eventType: AuditEventType.TASK_ASSIGNED,
+      description: `Updated allocation for ${assigneeUser?.displayName ?? assigneeUserId}`,
+      oldValue: {
+        assigneeId: assigneeUserId,
+        unitsPercent: prevRow?.unitsPercent,
+        workMinutes: prevRow?.workMinutes ?? null,
+        costPerUse:
+          prevRow?.costPerUse != null ? Number(prevRow.costPerUse) : null,
+      },
+      newValue: {
+        assigneeId: assigneeUserId,
+        unitsPercent: nextUnits,
+        workMinutes: nextWork,
+        costPerUse: nextCostPerUse != null ? Number(nextCostPerUse) : null,
+      },
     });
 
     const updated = await this.findById(taskId);
@@ -1717,6 +2470,203 @@ export class TaskService {
 
     const updated = await this.findById(taskId);
     if (!updated) throw new NotFoundException('Task not found');
+    await this.emitTaskUpdatedSocket(updated);
+    return updated;
+  }
+
+  private normalizeAssignmentUnits(raw: unknown, fallback = 100): number {
+    const n = raw === undefined || raw === null ? fallback : Number(raw);
+    if (!Number.isFinite(n) || n <= 0 || n > ASSIGNMENT_UNITS_MAX) {
+      throw new BadRequestException(
+        `unitsPercent must be between 0 exclusive and ${ASSIGNMENT_UNITS_MAX}`,
+      );
+    }
+    return n;
+  }
+
+  /** undefined = omit; null = clear DB column. */
+  private normalizeAssignmentWorkMinutes(raw: unknown): number | null | undefined {
+    if (raw === undefined) return undefined;
+    if (raw === null) return null;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 0 || n > 10_000_000) {
+      throw new BadRequestException(
+        'workMinutes must be null or a non-negative number',
+      );
+    }
+    return Math.round(n);
+  }
+
+  /** undefined = omit; null = clear. */
+  private optionalMoneyField(
+    raw: unknown,
+    fieldLabel: string,
+  ): Prisma.Decimal | null | undefined {
+    if (raw === undefined) return undefined;
+    if (raw === null) return null;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 0) {
+      throw new BadRequestException(
+        `${fieldLabel} must be null or a non-negative number`,
+      );
+    }
+    return new Prisma.Decimal(n);
+  }
+
+  async addGenericResourceAssignment(
+    taskId: string,
+    actorId: string,
+    body: AddTaskGenericResourceAssignmentRequest,
+  ): Promise<TaskDto> {
+    const prior = await this.prisma.task.findUnique({
+      where: { id: taskId },
+      include: { assignees: true },
+    });
+    if (!prior || prior.deletedAt) {
+      throw new NotFoundException('Task not found');
+    }
+    const wsId = await resolveTaskPrimaryWorkspaceId(this.prisma, prior);
+    if (!wsId) {
+      throw new BadRequestException(
+        'Task must belong to a project with a workspace to use generic resources',
+      );
+    }
+    const gr = await this.prisma.genericResource.findUnique({
+      where: { id: body.genericResourceId },
+    });
+    if (!gr || gr.workspaceId !== wsId) {
+      throw new BadRequestException(
+        'Generic resource not found in this task workspace',
+      );
+    }
+    const units = this.normalizeAssignmentUnits(body.unitsPercent, 100);
+    const costPerUse =
+      body.costPerUse === undefined || body.costPerUse === null
+        ? undefined
+        : new Prisma.Decimal(body.costPerUse);
+    if (costPerUse != null && Number(costPerUse) < 0) {
+      throw new BadRequestException('costPerUse must be non-negative');
+    }
+    try {
+      await this.prisma.taskGenericResourceAssignment.create({
+        data: {
+          taskId,
+          genericResourceId: body.genericResourceId,
+          unitsPercent: units,
+          ...(costPerUse !== undefined ? { costPerUse } : {}),
+        },
+      });
+    } catch (e: any) {
+      if (e?.code === 'P2002') {
+        throw new BadRequestException('Resource is already assigned to this task');
+      }
+      throw e;
+    }
+    const updated = await this.findById(taskId);
+    if (!updated) throw new NotFoundException('Task not found');
+    await this.taskActivityLog.log({
+      actorId,
+      taskId,
+      projectId: prior.projectId,
+      eventType: AuditEventType.TASK_UPDATED,
+      description: `Assigned generic resource "${gr.name}"`,
+      newValue: { genericResourceId: gr.id, unitsPercent: units },
+    });
+    await this.emitTaskUpdatedSocket(updated);
+    return updated;
+  }
+
+  async patchGenericResourceAssignment(
+    taskId: string,
+    actorId: string,
+    genericResourceId: string,
+    body: PatchTaskGenericResourceAssignmentRequest,
+  ): Promise<TaskDto> {
+    const prior = await this.prisma.task.findUnique({
+      where: { id: taskId },
+    });
+    if (!prior || prior.deletedAt) {
+      throw new NotFoundException('Task not found');
+    }
+    if (body.unitsPercent === undefined && body.costPerUse === undefined) {
+      throw new BadRequestException('Provide unitsPercent and/or costPerUse');
+    }
+    const data: { unitsPercent?: number; costPerUse?: Prisma.Decimal | null } =
+      {};
+    if (body.unitsPercent !== undefined) {
+      data.unitsPercent = this.normalizeAssignmentUnits(body.unitsPercent, 100);
+    }
+    if (body.costPerUse !== undefined) {
+      data.costPerUse =
+        body.costPerUse === null ? null : new Prisma.Decimal(body.costPerUse);
+      if (data.costPerUse != null && Number(data.costPerUse) < 0) {
+        throw new BadRequestException('costPerUse must be null or non-negative');
+      }
+    }
+    try {
+      await this.prisma.taskGenericResourceAssignment.update({
+        where: {
+          taskId_genericResourceId: { taskId, genericResourceId },
+        },
+        data,
+      });
+    } catch (e: any) {
+      if (e?.code === 'P2025') {
+        throw new NotFoundException('Assignment not found on this task');
+      }
+      throw e;
+    }
+    const updated = await this.findById(taskId);
+    if (!updated) throw new NotFoundException('Task not found');
+    await this.taskActivityLog.log({
+      actorId,
+      taskId,
+      projectId: prior.projectId,
+      eventType: AuditEventType.TASK_UPDATED,
+      description: 'Updated generic resource assignment',
+      newValue: { genericResourceId, ...data },
+    });
+    await this.emitTaskUpdatedSocket(updated);
+    return updated;
+  }
+
+  async removeGenericResourceAssignment(
+    taskId: string,
+    actorId: string,
+    genericResourceId: string,
+  ): Promise<TaskDto> {
+    const prior = await this.prisma.task.findUnique({
+      where: { id: taskId },
+    });
+    if (!prior || prior.deletedAt) {
+      throw new NotFoundException('Task not found');
+    }
+    const gr = await this.prisma.genericResource.findUnique({
+      where: { id: genericResourceId },
+      select: { name: true },
+    });
+    try {
+      await this.prisma.taskGenericResourceAssignment.delete({
+        where: {
+          taskId_genericResourceId: { taskId, genericResourceId },
+        },
+      });
+    } catch (e: any) {
+      if (e?.code === 'P2025') {
+        throw new NotFoundException('Assignment not found on this task');
+      }
+      throw e;
+    }
+    const updated = await this.findById(taskId);
+    if (!updated) throw new NotFoundException('Task not found');
+    await this.taskActivityLog.log({
+      actorId,
+      taskId,
+      projectId: prior.projectId,
+      eventType: AuditEventType.TASK_UPDATED,
+      description: `Removed generic resource "${gr?.name ?? genericResourceId}"`,
+      oldValue: { genericResourceId },
+    });
     await this.emitTaskUpdatedSocket(updated);
     return updated;
   }
@@ -2042,6 +2992,7 @@ export class TaskService {
           action: 'updated',
         });
       }
+      this.scheduleGoalMetricRecompute(links.map((l) => l.workspaceId));
     } else if (row.workspaceId) {
       this.eventsGateway.emitToWorkspace(row.workspaceId, 'task:updated', {
         task: dto,
@@ -2051,6 +3002,19 @@ export class TaskService {
         task: dto,
         action: 'updated',
       });
+      this.scheduleGoalMetricRecompute([row.workspaceId]);
+    }
+  }
+
+  /** Recompute workspace goal metrics that use task-backed definitions (async, non-blocking). */
+  private scheduleGoalMetricRecompute(
+    workspaceIds: (string | null | undefined)[],
+  ): void {
+    const seen = new Set<string>();
+    for (const w of workspaceIds) {
+      if (typeof w !== 'string' || !w || seen.has(w)) continue;
+      seen.add(w);
+      this.goalMetricCompute.scheduleRecomputeWorkspace(w);
     }
   }
 
@@ -2090,7 +3054,59 @@ export class TaskService {
     );
   }
 
-  private taskToDto(task: any): TaskDto {
+  private async workspaceIdsForProject(projectId: string): Promise<string[]> {
+    const p = await this.prisma.project.findUnique({
+      where: { id: projectId },
+      select: { workspaceLinks: { select: { workspaceId: true } } },
+    });
+    return (p?.workspaceLinks ?? []).map((l) => l.workspaceId);
+  }
+
+  private async resolveTaskWorkCalendarCreateData(
+    project: { workspaceLinks: { workspaceId: string }[] },
+    workCalendarId: string | null | undefined,
+  ): Promise<{ workCalendarId?: string | null }> {
+    if (workCalendarId === undefined) return {};
+    const wsIds = project.workspaceLinks.map((l) => l.workspaceId);
+    if (workCalendarId === null) return { workCalendarId: null };
+    const cal = await this.prisma.workCalendar.findFirst({
+      where: { id: workCalendarId, workspaceId: { in: wsIds } },
+    });
+    if (!cal) {
+      throw new BadRequestException(
+        'workCalendarId must reference a work calendar in this project workspace',
+      );
+    }
+    return { workCalendarId: cal.id };
+  }
+
+  private computeWbsOutlineMap(
+    rows: { id: string; parentTaskId: string | null; sortOrder: number }[],
+  ): Map<string, string> {
+    if (!Array.isArray(rows)) return new Map();
+    const byParent = new Map<string | null, typeof rows>();
+    for (const r of rows) {
+      const p = r.parentTaskId ?? null;
+      if (!byParent.has(p)) byParent.set(p, []);
+      byParent.get(p)!.push(r);
+    }
+    for (const arr of byParent.values()) {
+      arr.sort((a, b) => a.sortOrder - b.sortOrder);
+    }
+    const out = new Map<string, string>();
+    const walk = (parentId: string | null, prefix: string) => {
+      const kids = byParent.get(parentId) ?? [];
+      kids.forEach((k, i) => {
+        const label = prefix ? `${prefix}.${i + 1}` : String(i + 1);
+        out.set(k.id, label);
+        walk(k.id, label);
+      });
+    };
+    walk(null, '');
+    return out;
+  }
+
+  private taskToDto(task: any, wbsMap?: Map<string, string>): TaskDto {
     return {
       id: task.id,
       projectId: task.projectId,
@@ -2133,16 +3149,59 @@ export class TaskService {
       recurrenceUntil: task.recurrenceUntil ?? undefined,
       isTemplate: task.isTemplate ?? false,
       isMilestone: task.isMilestone ?? false,
+      isManuallyScheduled: task.isManuallyScheduled ?? true,
+      constraintType: task.constraintType,
+      constraintDate: task.constraintDate ?? undefined,
+      deadlineDate: task.deadlineDate ?? undefined,
+      durationWorkingMinutes: task.durationWorkingMinutes ?? null,
+      workMinutes: task.workMinutes ?? null,
+      scheduleMode: task.scheduleMode,
+      workCalendarId: task.workCalendarId ?? undefined,
+      effortDriven: task.effortDriven ?? false,
+      isSummaryRollup: task.isSummaryRollup ?? false,
+      levelingPriority: task.levelingPriority ?? 500,
+      levelingDelayWorkingDays: task.levelingDelayWorkingDays ?? 0,
+      levelingCanSplit: task.levelingCanSplit ?? false,
+      wbsOutlineNumber: wbsMap?.get(task.id) ?? undefined,
+      percentComplete: task.percentComplete ?? 0,
+      fixedCost: task.fixedCost != null ? Number(task.fixedCost) : null,
+      actualCost: task.actualCost != null ? Number(task.actualCost) : null,
+      overtimeWorkMinutes: task.overtimeWorkMinutes ?? null,
+      isBudgetTask: task.isBudgetTask ?? false,
+      scheduleSegments: this.scheduleSegmentsToDto(task.scheduleSegments),
+      workContour: (task.workContour ?? TaskWorkContour.FLAT) as TaskWorkContour,
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,
       assignees: task.assignees?.map((a: any) => ({
         id: a.id,
         taskId: a.taskId,
         userId: a.userId,
+        unitsPercent: a.unitsPercent ?? 100,
+        workMinutes: a.workMinutes ?? null,
+        costPerUse: a.costPerUse != null ? Number(a.costPerUse) : null,
         user: a.user,
         assignedAt: a.assignedAt,
       })),
-      subtasks: task.subtasks?.map((s: any) => this.taskToDto(s)),
+      genericResourceAssignments: task.genericResourceAssignments?.map(
+        (a: any) => ({
+          id: a.id,
+          taskId: a.taskId,
+          genericResourceId: a.genericResourceId,
+          unitsPercent: a.unitsPercent ?? 100,
+          costPerUse: a.costPerUse != null ? Number(a.costPerUse) : null,
+          assignedAt: a.assignedAt,
+          genericResource: {
+            id: a.genericResource.id,
+            name: a.genericResource.name,
+            maxUnitsPercent: a.genericResource.maxUnitsPercent ?? 100,
+            standardRatePerHour:
+              a.genericResource.standardRatePerHour != null
+                ? Number(a.genericResource.standardRatePerHour)
+                : null,
+          },
+        }),
+      ),
+      subtasks: task.subtasks?.map((s: any) => this.taskToDto(s, wbsMap)),
       tags: task.tags?.map((t: any) => ({
         id: t.tag.id,
         workspaceId: t.tag.workspaceId,
@@ -2155,6 +3214,9 @@ export class TaskService {
         dependentId: d.dependentId,
         blockingId: d.blockingId,
         type: d.type,
+        linkType: d.linkType ?? 'FS',
+        lagDays: typeof d.lagDays === 'number' ? d.lagDays : 0,
+        lagIsElapsed: d.lagIsElapsed === true,
         createdAt: d.createdAt,
         blockingTask: d.blockingTask ? this.taskSummaryToDto(d.blockingTask) : undefined,
       })),
@@ -2163,6 +3225,9 @@ export class TaskService {
         dependentId: d.dependentId,
         blockingId: d.blockingId,
         type: d.type,
+        linkType: d.linkType ?? 'FS',
+        lagDays: typeof d.lagDays === 'number' ? d.lagDays : 0,
+        lagIsElapsed: d.lagIsElapsed === true,
         createdAt: d.createdAt,
         dependentTask: d.dependentTask ? this.taskSummaryToDto(d.dependentTask) : undefined,
       })),
@@ -2216,6 +3281,8 @@ export class TaskService {
   }
 
   private customFieldDefToDto(field: any) {
+    const computedKind =
+      field.computedKind ?? CustomFieldComputedKind.NONE;
     return {
       id: field.id,
       workspaceId: field.workspaceId,
@@ -2223,6 +3290,12 @@ export class TaskService {
       type: field.type,
       options: field.options,
       isRequired: field.isRequired,
+      description: field.description ?? undefined,
+      defaultValue: field.defaultValue ?? undefined,
+      computedKind,
+      rollupSourceFieldId: field.rollupSourceFieldId ?? undefined,
+      rollupAggregation: field.rollupAggregation ?? undefined,
+      isComputed: computedKind !== CustomFieldComputedKind.NONE,
       createdAt: field.createdAt,
     };
   }
@@ -2245,6 +3318,7 @@ export class TaskService {
     );
 
     for (const link of links) {
+      if (link.field.computedKind !== CustomFieldComputedKind.NONE) continue;
       if (!link.field.isRequired) continue;
       const fType = link.field.type as CustomFieldType;
       const raw = byField.get(link.field.id);

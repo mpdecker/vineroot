@@ -2,10 +2,17 @@ import { Test } from '@nestjs/testing';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { DashboardService } from './dashboard.service';
 import { PrismaService } from '../common/prisma.service';
+import { ScheduleProjectService } from '../schedule/schedule-project.service';
 
 describe('DashboardService', () => {
   let service: DashboardService;
   const prisma = {
+    $transaction: jest.fn(async (arg: unknown) => {
+      if (typeof arg === 'function') {
+        return (arg as (tx: typeof prisma) => Promise<unknown>)(prisma);
+      }
+      return Promise.all(arg as Promise<unknown>[]);
+    }),
     dashboard: {
       findMany: jest.fn(),
       create: jest.fn(),
@@ -15,6 +22,7 @@ describe('DashboardService', () => {
     },
     dashboardWidget: {
       create: jest.fn(),
+      findMany: jest.fn(),
       findFirst: jest.fn(),
       update: jest.fn(),
       delete: jest.fn(),
@@ -62,6 +70,7 @@ describe('DashboardService', () => {
       providers: [
         DashboardService,
         { provide: PrismaService, useValue: prisma },
+        { provide: ScheduleProjectService, useValue: { evm: jest.fn() } },
       ],
     }).compile();
     service = moduleRef.get(DashboardService);
@@ -189,7 +198,7 @@ describe('DashboardService', () => {
         ],
       });
 
-      const full = await service.findByIdInWorkspace('ws1', 'd1', true);
+      const full = await service.findByIdInWorkspace('ws1', 'd1', true, 'u1');
 
       expect(prisma.task.groupBy).toHaveBeenCalled();
       expect(full?.widgets?.[0].resolved?.buckets).toEqual([
@@ -231,7 +240,7 @@ describe('DashboardService', () => {
         ],
       });
 
-      const full = await service.findByIdInWorkspace('ws1', 'd1', true);
+      const full = await service.findByIdInWorkspace('ws1', 'd1', true, 'u1');
       const resolved = full?.widgets?.[0].resolved as Record<string, unknown> | undefined;
 
       expect(resolved?.error).toBeUndefined();
@@ -262,7 +271,7 @@ describe('DashboardService', () => {
         ],
       });
 
-      const full = await service.findByIdInWorkspace('ws1', 'd1', true);
+      const full = await service.findByIdInWorkspace('ws1', 'd1', true, 'u1');
       expect(full?.widgets?.[0].resolved?.error).toMatch(/projectId/i);
     });
   });
@@ -310,7 +319,7 @@ describe('DashboardService', () => {
         ],
       });
 
-      const full = await service.findByIdInWorkspace('ws1', 'd1', true);
+      const full = await service.findByIdInWorkspace('ws1', 'd1', true, 'u1');
       const resolved = full?.widgets?.[0].resolved as Record<string, unknown> | undefined;
 
       expect(resolved?.error).toBeUndefined();
@@ -319,6 +328,287 @@ describe('DashboardService', () => {
       expect(rows).toHaveLength(1);
       expect(rows[0].projectId).toBe('p1');
       expect(rows[0].doneTasks).toBe(1);
+    });
+  });
+
+  describe('resolveWidget NUMBER_METRIC', () => {
+    it('uses static value/label when no reporting metric config is present', async () => {
+      prisma.dashboard.findFirst.mockResolvedValue({
+        ...dashRow,
+        widgets: [
+          {
+            id: 'w-num',
+            dashboardId: 'd1',
+            type: 'NUMBER_METRIC',
+            title: 'KPI',
+            sortOrder: 0,
+            gridX: 0,
+            gridY: 0,
+            gridW: 4,
+            gridH: 2,
+            config: { value: 42, label: 'Static' },
+            createdAt: now,
+            updatedAt: now,
+          },
+        ],
+      });
+
+      const full = await service.findByIdInWorkspace('ws1', 'd1', true, 'u1');
+      expect(full?.widgets?.[0].resolved).toEqual({ value: 42, label: 'Static' });
+    });
+
+    it('resolves OPEN_TASKS metric through reporting summary logic', async () => {
+      prisma.task.findMany.mockResolvedValue([
+        {
+          id: 't1',
+          status: 'BACKLOG',
+          createdAt: new Date(),
+          completedAt: null,
+          assignees: [],
+        },
+        {
+          id: 't2',
+          status: 'DONE',
+          createdAt: new Date(),
+          completedAt: new Date(),
+          assignees: [],
+        },
+      ]);
+      prisma.dashboard.findFirst.mockResolvedValue({
+        ...dashRow,
+        widgets: [
+          {
+            id: 'w-num',
+            dashboardId: 'd1',
+            type: 'NUMBER_METRIC',
+            title: 'KPI',
+            sortOrder: 0,
+            gridX: 0,
+            gridY: 0,
+            gridW: 4,
+            gridH: 2,
+            config: { metric: 'OPEN_TASKS', label: 'Open now' },
+            createdAt: now,
+            updatedAt: now,
+          },
+        ],
+      });
+
+      const full = await service.findByIdInWorkspace('ws1', 'd1', true, 'u1');
+      expect(full?.widgets?.[0].resolved).toMatchObject({
+        value: 1,
+        label: 'Open now',
+        period: { from: expect.any(String), to: expect.any(String) },
+      });
+    });
+
+    it('returns error payload for invalid metric config', async () => {
+      prisma.dashboard.findFirst.mockResolvedValue({
+        ...dashRow,
+        widgets: [
+          {
+            id: 'w-num',
+            dashboardId: 'd1',
+            type: 'NUMBER_METRIC',
+            title: 'KPI',
+            sortOrder: 0,
+            gridX: 0,
+            gridY: 0,
+            gridW: 4,
+            gridH: 2,
+            config: { metric: 'NOT_REAL' },
+            createdAt: now,
+            updatedAt: now,
+          },
+        ],
+      });
+
+      const full = await service.findByIdInWorkspace('ws1', 'd1', true, 'u1');
+      expect(full?.widgets?.[0].resolved?.error).toMatch(/Unknown metric/i);
+    });
+
+    it('resolves AVG_LEAD_TIME_DAYS from reporting flow metrics', async () => {
+      const completedAt = new Date();
+      const createdAt = new Date(completedAt);
+      createdAt.setDate(createdAt.getDate() - 4);
+      prisma.task.findMany.mockResolvedValue([
+        {
+          id: 't1',
+          status: 'DONE',
+          createdAt,
+          startDate: null,
+          completedAt,
+          assignees: [],
+        },
+      ]);
+      prisma.dashboard.findFirst.mockResolvedValue({
+        ...dashRow,
+        widgets: [
+          {
+            id: 'w-num',
+            dashboardId: 'd1',
+            type: 'NUMBER_METRIC',
+            title: 'KPI',
+            sortOrder: 0,
+            gridX: 0,
+            gridY: 0,
+            gridW: 4,
+            gridH: 2,
+            config: { metric: 'AVG_LEAD_TIME_DAYS', label: 'Lead' },
+            createdAt: now,
+            updatedAt: now,
+          },
+        ],
+      });
+
+      const full = await service.findByIdInWorkspace('ws1', 'd1', true, 'u1');
+      expect(full?.widgets?.[0].resolved).toMatchObject({
+        value: 4,
+        label: 'Lead',
+        period: { from: expect.any(String), to: expect.any(String) },
+      });
+    });
+  });
+
+  describe('duplicateDashboard', () => {
+    it('clones dashboard and widgets', async () => {
+      const w1 = {
+        id: 'w1',
+        dashboardId: 'd1',
+        type: 'TEXT_NOTE',
+        title: 'Note',
+        sortOrder: 0,
+        gridX: 0,
+        gridY: 0,
+        gridW: 4,
+        gridH: 2,
+        config: { body: 'hi' },
+        createdAt: now,
+        updatedAt: now,
+      };
+      prisma.dashboard.findFirst
+        .mockResolvedValueOnce({
+          ...dashRow,
+          name: 'Original',
+          description: null,
+          color: null,
+          layoutMeta: null,
+          widgets: [w1],
+        })
+        .mockResolvedValueOnce({
+          ...dashRow,
+          id: 'd2',
+          name: 'Original (copy)',
+          widgets: [
+            {
+              ...w1,
+              id: 'w2',
+              dashboardId: 'd2',
+            },
+          ],
+        });
+      prisma.dashboard.create.mockResolvedValue({
+        ...dashRow,
+        id: 'd2',
+        name: 'Original (copy)',
+      });
+      prisma.dashboardWidget.create.mockResolvedValue({});
+
+      const dto = await service.duplicateDashboard('ws1', 'd1', 'u1', {});
+
+      expect(prisma.dashboard.create).toHaveBeenCalled();
+      expect(prisma.dashboardWidget.create).toHaveBeenCalled();
+      expect(dto.name).toBe('Original (copy)');
+      expect(dto.widgets).toHaveLength(1);
+    });
+  });
+
+  describe('createFromTemplate', () => {
+    it('creates a blank dashboard', async () => {
+      prisma.dashboard.create.mockResolvedValue({
+        ...dashRow,
+        id: 'new1',
+        name: 'Blank',
+      });
+      prisma.dashboard.findFirst.mockResolvedValue({
+        ...dashRow,
+        id: 'new1',
+        name: 'Blank',
+        widgets: [],
+      });
+
+      const dto = await service.createFromTemplate('ws1', 'u1', {
+        templateId: 'blank',
+      });
+
+      expect(dto.name).toBe('Blank');
+      expect(dto.widgets).toEqual([]);
+    });
+  });
+
+  describe('applyLayoutPreset', () => {
+    it('repositions widgets for overview preset', async () => {
+      prisma.dashboard.findFirst
+        .mockResolvedValueOnce({ id: 'd1', workspaceId: 'ws1' })
+        .mockResolvedValueOnce({
+          ...dashRow,
+          widgets: [
+            {
+              id: 'b',
+              dashboardId: 'd1',
+              type: 'TEXT_NOTE',
+              title: 'B',
+              sortOrder: 0,
+              gridX: 0,
+              gridY: 0,
+              gridW: 8,
+              gridH: 3,
+              config: {},
+              createdAt: now,
+              updatedAt: now,
+            },
+            {
+              id: 'a',
+              dashboardId: 'd1',
+              type: 'TEXT_NOTE',
+              title: 'A',
+              sortOrder: 1,
+              gridX: 8,
+              gridY: 0,
+              gridW: 4,
+              gridH: 1,
+              config: {},
+              createdAt: now,
+              updatedAt: now,
+            },
+          ],
+        });
+      prisma.dashboardWidget.findMany.mockResolvedValue([
+        {
+          id: 'a',
+          sortOrder: 1,
+          gridX: 0,
+          gridY: 0,
+          gridW: 12,
+          gridH: 2,
+        },
+        {
+          id: 'b',
+          sortOrder: 0,
+          gridX: 0,
+          gridY: 2,
+          gridW: 6,
+          gridH: 2,
+        },
+      ]);
+      prisma.dashboardWidget.update.mockResolvedValue({});
+
+      const dto = await service.applyLayoutPreset('ws1', 'd1', {
+        presetId: 'overview',
+      });
+
+      expect(prisma.dashboardWidget.update).toHaveBeenCalled();
+      expect(dto.widgets).toHaveLength(2);
     });
   });
 });

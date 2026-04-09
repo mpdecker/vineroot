@@ -20,6 +20,71 @@ export function eachCalendarDayInclusive(start: Date, end: Date): Date[] {
   return out;
 }
 
+export type SprintReportWindowErrorCode =
+  | 'INVALID_DATE'
+  | 'FROM_AFTER_TO'
+  | 'NO_OVERLAP';
+
+/**
+ * Intersect optional `from` / `to` (YYYY-MM-DD or Date-parsable) with sprint calendar bounds.
+ */
+export function resolveSprintReportWindow(
+  sprintStart: Date,
+  sprintEnd: Date,
+  fromStr?: string,
+  toStr?: string,
+):
+  | { ok: true; windowStart: Date; windowEnd: Date }
+  | { ok: false; code: SprintReportWindowErrorCode } {
+  const sprintFirst = startOfCalendarDay(sprintStart);
+  const sprintLast = startOfCalendarDay(sprintEnd);
+
+  const parseOpt = (s?: string): Date | undefined => {
+    if (s === undefined || s === null || String(s).trim() === '') {
+      return undefined;
+    }
+    const t = String(s).trim();
+    const isoDay = /^(\d{4})-(\d{2})-(\d{2})$/.exec(t);
+    if (isoDay) {
+      const y = Number(isoDay[1]);
+      const mo = Number(isoDay[2]) - 1;
+      const d = Number(isoDay[3]);
+      const day = startOfCalendarDay(new Date(y, mo, d));
+      return Number.isNaN(day.getTime()) ? undefined : day;
+    }
+    const d = startOfCalendarDay(new Date(t));
+    return Number.isNaN(d.getTime()) ? undefined : d;
+  };
+
+  const fromParsed = parseOpt(fromStr);
+  const toParsed = parseOpt(toStr);
+  if (fromStr !== undefined && fromStr !== null && String(fromStr).trim() !== '' && fromParsed === undefined) {
+    return { ok: false, code: 'INVALID_DATE' };
+  }
+  if (toStr !== undefined && toStr !== null && String(toStr).trim() !== '' && toParsed === undefined) {
+    return { ok: false, code: 'INVALID_DATE' };
+  }
+
+  let winStart = fromParsed ?? sprintFirst;
+  let winEnd = toParsed ?? sprintLast;
+
+  if (winStart.getTime() > winEnd.getTime()) {
+    return { ok: false, code: 'FROM_AFTER_TO' };
+  }
+
+  if (winStart.getTime() < sprintFirst.getTime()) {
+    winStart = sprintFirst;
+  }
+  if (winEnd.getTime() > sprintLast.getTime()) {
+    winEnd = sprintLast;
+  }
+  if (winStart.getTime() > winEnd.getTime()) {
+    return { ok: false, code: 'NO_OVERLAP' };
+  }
+
+  return { ok: true, windowStart: winStart, windowEnd: winEnd };
+}
+
 /** Match sprint burndown day labels (same as legacy project.service). */
 export function calendarDayToIsoKey(day: Date): string {
   return day.toISOString().slice(0, 10);

@@ -20,6 +20,7 @@ vi.mock('../../hooks/useTasks', () => ({
   useCreateTask: () => ({ mutate: vi.fn(), isPending: false }),
   useAddTaskDependency: () => ({ mutate: vi.fn(), isPending: false }),
   useRemoveTaskDependency: () => ({ mutate: vi.fn(), isPending: false }),
+  useUpdateTaskDependencyLag: () => ({ mutate: vi.fn(), isPending: false }),
   useAddTaskAttachment: () => ({ mutate: vi.fn(), isPending: false }),
   useDeleteTaskAttachment: () => ({ mutate: vi.fn(), isPending: false }),
   useUploadTaskAttachment: () => ({ mutate: vi.fn(), isPending: false }),
@@ -54,6 +55,12 @@ vi.mock('../../hooks/useComments', () => ({
 
 vi.mock('../../hooks/useAuditLogs', () => ({
   useTaskAuditLogs: () => ({ data: [] }),
+}));
+
+vi.mock('../../lib/api', () => ({
+  api: {
+    get: vi.fn(() => Promise.resolve({ data: [] })),
+  },
 }));
 
 function buildTask(overrides: Partial<Task> = {}): Task {

@@ -15,3 +15,37 @@
   .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
   .scrollbar-thin::-webkit-scrollbar-thumb { background-color: #e5e7eb; border-radius: 2px; }
 }
+
+/* F-01: print / PDF snapshot of the timeline (see #vineroot-schedule-print-root in ProjectTimelineView) */
+@media print {
+  @page {
+    size: landscape;
+    margin: 10mm;
+  }
+  html,
+  body {
+    height: auto !important;
+    overflow: visible !important;
+    background: #fff !important;
+  }
+  body * {
+    visibility: hidden;
+  }
+  #vineroot-schedule-print-root,
+  #vineroot-schedule-print-root * {
+    visibility: visible;
+  }
+  #vineroot-schedule-print-root {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: auto !important;
+    overflow: visible !important;
+  }
+  #vineroot-schedule-print-root .overflow-auto,
+  #vineroot-schedule-print-root .overflow-y-auto,
+  #vineroot-schedule-print-root .overflow-hidden {
+    overflow: visible !important;
+  }
+}

@@ -9,6 +9,7 @@ interface AuthState {
   isAuthenticated: boolean;
   login(user: User, accessToken: string, refreshToken: string): void;
   setTokens(accessToken: string, refreshToken: string): void;
+  updateUser(partial: Partial<User>): void;
   logout(): void;
 }
 
@@ -22,6 +23,10 @@ export const useAuthStore = create<AuthState>()(
       login: (user, accessToken, refreshToken) =>
         set({ user, accessToken, refreshToken, isAuthenticated: true }),
       setTokens: (accessToken, refreshToken) => set({ accessToken, refreshToken }),
+      updateUser: (partial) =>
+        set((s) => ({
+          user: s.user ? { ...s.user, ...partial } : null,
+        })),
       logout: () => set({ user: null, accessToken: null, refreshToken: null, isAuthenticated: false }),
     }),
     { name: 'vineroot-auth', partialize: (s) => ({ accessToken: s.accessToken, refreshToken: s.refreshToken, user: s.user }) }

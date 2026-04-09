@@ -6,8 +6,8 @@
   "private": true,
   "license": "UNLICENSED",
   "scripts": {
-    "build": "nest build",
-    "start": "nest build && node dist/main",
+    "build": "npx --yes rimraf dist && nest build",
+    "start": "npm run build && node dist/main.js",
     "dev": "nest start --watch",
     "debug": "nest start --debug --watch",
     "test": "jest",

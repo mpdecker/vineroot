@@ -1,3 +1,9 @@
+/**
+ * Client-side longest-path approximation (calendar-day durations + lag days).
+ * For authenticated workspace projects, the timeline and schedule APIs prefer
+ * server CPM (`GET …/schedule/critical-path`) — see `ProjectTimelineView` and
+ * `useProjectScheduleCriticalPath`.
+ */
 import { differenceInDays, parseISO } from 'date-fns';
 import type { Task } from '../types';
 
@@ -36,7 +42,7 @@ export function computeCriticalPathTaskIds(tasks: Task[]): Set<string> {
   }
   for (const t of tasks) {
     for (const dep of t.waitingOn ?? []) {
-      const b = dep.blockingTask?.id;
+      const b = dep.blockingTask?.id ?? dep.blockingId;
       if (!b || !ids.has(b)) continue;
       adj.get(b)!.push(t.id);
       indeg.set(t.id, (indeg.get(t.id) ?? 0) + 1);
@@ -67,7 +73,11 @@ export function computeCriticalPathTaskIds(tasks: Task[]): Set<string> {
     const du = dist.get(u)!;
     for (const v of adj.get(u) ?? []) {
       const tv = byId.get(v)!;
-      const cand = du + taskCriticalDurationDays(tv);
+      const dep = (tv.waitingOn ?? []).find(
+        (d) => (d.blockingTask?.id ?? d.blockingId) === u,
+      );
+      const lag = dep?.lagDays ?? 0;
+      const cand = du + lag + taskCriticalDurationDays(tv);
       if (cand > dist.get(v)!) {
         dist.set(v, cand);
         pred.set(v, u);

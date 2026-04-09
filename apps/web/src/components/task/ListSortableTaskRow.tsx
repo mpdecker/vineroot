@@ -3,6 +3,7 @@ import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { TaskRow } from './TaskRow';
 import type { Task } from '../../types';
+import type { TaskScheduleInsight } from '../../lib/taskScheduleInsight';
 
 export function ListSortableTaskRow({
   task,
@@ -11,6 +12,7 @@ export function ListSortableTaskRow({
   onStatusChange,
   leading,
   isSubtask,
+  scheduleInsight,
 }: {
   task: Task;
   sectionId: string;
@@ -18,6 +20,7 @@ export function ListSortableTaskRow({
   onStatusChange: (taskId: string, status: string) => void;
   leading?: ReactNode;
   isSubtask?: boolean;
+  scheduleInsight?: TaskScheduleInsight;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: task.id,
@@ -36,6 +39,7 @@ export function ListSortableTaskRow({
       onSelect={onSelect}
       onStatusChange={onStatusChange}
       leading={leading}
+      scheduleInsight={scheduleInsight}
       sortable={{
         ref: setNodeRef,
         style,

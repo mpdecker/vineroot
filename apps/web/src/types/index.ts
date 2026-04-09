@@ -34,6 +34,9 @@ export interface User {
   isAgent: boolean;
   agentTier?: ActorTier;
   timezone: string;
+  workCalendarId?: string | null;
+  resourceStandardRatePerHour?: number | null;
+  resourceOvertimeRatePerHour?: number | null;
 }
 
 export interface Workspace {
@@ -135,6 +138,11 @@ export interface TaskDependency {
   dependentId: string;
   blockingId: string;
   type: string;
+  linkType?: string;
+  /** Finish-to-start lag in whole days; negative = lead (overlap). */
+  lagDays?: number;
+  /** Calendar-day lag vs working-day lag. */
+  lagIsElapsed?: boolean;
   createdAt: string;
   blockingTask?: TaskSummary;
   dependentTask?: TaskSummary;
@@ -158,6 +166,12 @@ export interface CustomFieldDefinition {
   type: string;
   options?: Record<string, unknown>;
   isRequired: boolean;
+  description?: string | null;
+  defaultValue?: Record<string, unknown> | null;
+  computedKind?: 'NONE' | 'SUBTASK_ROLLUP_NUMBER';
+  rollupSourceFieldId?: string | null;
+  rollupAggregation?: 'SUM' | 'AVG' | 'MIN' | 'MAX' | 'COUNT' | null;
+  isComputed?: boolean;
   createdAt: string;
 }
 
@@ -202,6 +216,8 @@ export interface Task {
   startDate?: string;
   dueDate?: string;
   completedAt?: string;
+  /** Scheduled work (minutes); used with baselines / EVM when set. */
+  workMinutes?: number | null;
   estimatedMin?: number;
   actualMin?: number;
   sortOrder: number;
@@ -225,6 +241,7 @@ export interface Task {
   isTemplate?: boolean;
   isMilestone?: boolean;
   assignees?: TaskAssignee[];
+  genericResourceAssignments?: TaskGenericResourceAssignment[];
   subtasks?: Task[];
   tags?: Tag[];
   customFields?: CustomFieldValue[];
@@ -236,6 +253,39 @@ export interface Task {
   subtaskCount?: number;
   createdAt: string;
   updatedAt: string;
+  isManuallyScheduled?: boolean;
+  constraintType?: string;
+  constraintDate?: string | null;
+  deadlineDate?: string | null;
+  durationWorkingMinutes?: number | null;
+  scheduleMode?: string;
+  workCalendarId?: string | null;
+  effortDriven?: boolean;
+  isSummaryRollup?: boolean;
+  /** 0–1000; lower = delayed first when leveling (MSP-style). */
+  levelingPriority?: number;
+  /** Working days accumulated by resource leveling. */
+  levelingDelayWorkingDays?: number;
+  /** Hint: task may be split when split-aware leveling exists. */
+  levelingCanSplit?: boolean;
+  wbsOutlineNumber?: string | null;
+  percentComplete?: number;
+  fixedCost?: number | null;
+  actualCost?: number | null;
+  overtimeWorkMinutes?: number | null;
+  isBudgetTask?: boolean;
+  /** Split-task segments for Gantt (Phase 7); each { start, end } ISO, optional workMinutes. */
+  scheduleSegments?: { start: string; end: string; workMinutes?: number | null }[] | null;
+  /** Timephased grid work spread when there are no segments (Phase 4). */
+  workContour?:
+    | 'FLAT'
+    | 'FRONT_LOADED'
+    | 'BACK_LOADED'
+    | 'BELL'
+    | 'DOUBLE_PEAK'
+    | 'TURTLE'
+    | 'EARLY_PEAK'
+    | 'LATE_PEAK';
   project?: { name: string; color: ProjectColor };
   section?: { name: string };
   createdBy?: User;
@@ -244,8 +294,28 @@ export interface Task {
 export interface TaskAssignee {
   id: string;
   userId: string;
+  /** 1–100 allocation % for workload and leveling (default 100). */
+  unitsPercent?: number;
+  /** Assignment work (minutes); overrides task work × units for cost when set. */
+  workMinutes?: number | null;
+  costPerUse?: number | null;
   user: User;
   assignedAt: string;
+}
+
+export interface TaskGenericResourceAssignment {
+  id: string;
+  taskId: string;
+  genericResourceId: string;
+  unitsPercent: number;
+  costPerUse?: number | null;
+  assignedAt: string;
+  genericResource: {
+    id: string;
+    name: string;
+    maxUnitsPercent: number;
+    standardRatePerHour?: number | null;
+  };
 }
 
 export interface CommentMention {
@@ -334,6 +404,7 @@ export type DashboardWidgetType =
   | 'TASKS_BY_STATUS'
   | 'PROJECT_SUMMARY'
   | 'PROJECT_CFD'
+  | 'PROJECT_EVM'
   | 'PORTFOLIO_ACTIVE_SPRINTS'
   | 'PORTFOLIO_SPRINT_VELOCITY'
   | 'NUMBER_METRIC'

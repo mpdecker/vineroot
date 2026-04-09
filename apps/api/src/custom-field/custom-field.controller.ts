@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Put,
+  Patch,
   Body,
   Param,
   UseGuards,
@@ -15,6 +16,7 @@ import {
   CreateCustomFieldRequest,
   SetCustomFieldValueRequest,
   CustomFieldValueDto,
+  UpdateCustomFieldRequest,
 } from '@vineroot/shared-types';
 
 @Controller('api/v1/workspaces/:workspaceId/custom-fields')
@@ -35,6 +37,15 @@ export class CustomFieldController {
     @Body() req: CreateCustomFieldRequest,
   ): Promise<CustomFieldDefinitionDto> {
     return this.customFieldService.createDefinition(workspaceId, req);
+  }
+
+  @Patch(':fieldId')
+  async update(
+    @Param('workspaceId') workspaceId: string,
+    @Param('fieldId') fieldId: string,
+    @Body() req: UpdateCustomFieldRequest,
+  ): Promise<CustomFieldDefinitionDto> {
+    return this.customFieldService.updateDefinition(workspaceId, fieldId, req);
   }
 
   @Put('tasks/:taskId/fields/:fieldId')

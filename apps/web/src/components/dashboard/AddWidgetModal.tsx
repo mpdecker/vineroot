@@ -6,6 +6,14 @@ import { useProjects } from '../../hooks/useProjects';
 import { usePortfolios } from '../../hooks/usePortfolios';
 import type { DashboardWidgetType } from '../../types';
 import { clsx } from 'clsx';
+import {
+  defaultWidgetCreationFormState,
+  getWidgetCreationSpec,
+  LIVE_METRIC_OPTIONS,
+  WIDGET_TYPE_ORDER,
+  type WidgetCreationFormState,
+  type WidgetFieldSpec,
+} from './widget-creation-params';
 
 interface AddWidgetModalProps {
   isOpen: boolean;
@@ -14,39 +22,233 @@ interface AddWidgetModalProps {
   dashboardId: string;
 }
 
-const TYPES: { value: DashboardWidgetType; label: string; hint: string }[] = [
-  {
-    value: 'TASKS_BY_STATUS',
-    label: 'Tasks by status',
-    hint: 'Bar chart for the workspace',
-  },
-  {
-    value: 'PROJECT_SUMMARY',
-    label: 'Project summary',
-    hint: 'Progress for one project',
-  },
-  {
-    value: 'PROJECT_CFD',
-    label: 'Project cumulative flow',
-    hint: 'Stacked status counts (90 days)',
-  },
-  {
-    value: 'PORTFOLIO_ACTIVE_SPRINTS',
-    label: 'Portfolio active sprints',
-    hint: 'Current/planned sprint health per project',
-  },
-  {
-    value: 'PORTFOLIO_SPRINT_VELOCITY',
-    label: 'Portfolio sprint velocity',
-    hint: 'Rolling average completed points per project',
-  },
-  { value: 'NUMBER_METRIC', label: 'Number', hint: 'Single KPI (editable in config later)' },
-  { value: 'AGENT_SLOT', label: 'Agent slot', hint: 'Placeholder for agent outputs' },
-  { value: 'TEXT_NOTE', label: 'Text note', hint: 'Markdown-friendly note' },
-];
-
 const selectClass =
   'w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white';
+
+function WidgetFieldRenderer({
+  field,
+  form,
+  setForm,
+  projects,
+  portfolios,
+}: {
+  field: WidgetFieldSpec;
+  form: WidgetCreationFormState;
+  setForm: React.Dispatch<React.SetStateAction<WidgetCreationFormState>>;
+  projects: { id: string; name: string }[] | undefined;
+  portfolios: { id: string; name: string }[] | undefined;
+}) {
+  switch (field.kind) {
+    case 'projectSelect':
+      return (
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1.5">Project</label>
+          <select
+            value={form.projectId}
+            onChange={(e) => setForm((s) => ({ ...s, projectId: e.target.value }))}
+            className={selectClass}
+            required
+          >
+            <option value="">Select project…</option>
+            {(projects ?? []).map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      );
+    case 'portfolioSelect':
+      return (
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1.5">Portfolio</label>
+          <select
+            value={form.portfolioId}
+            onChange={(e) => setForm((s) => ({ ...s, portfolioId: e.target.value }))}
+            className={selectClass}
+            required
+          >
+            <option value="">Select portfolio…</option>
+            {(portfolios ?? []).map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      );
+    case 'numberInput':
+      return (
+        <Input
+          label={field.label}
+          value={form.velocityTake}
+          onChange={(e) => setForm((s) => ({ ...s, velocityTake: e.target.value }))}
+          type="number"
+          min={field.min}
+          max={field.max}
+        />
+      );
+    case 'textarea':
+      return (
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">{field.label}</label>
+          <textarea
+            value={form.noteBody}
+            onChange={(e) => setForm((s) => ({ ...s, noteBody: e.target.value }))}
+            rows={4}
+            className={clsx(selectClass, 'resize-y')}
+            placeholder={field.placeholder}
+          />
+        </div>
+      );
+    case 'select':
+      return (
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1.5">{field.label}</label>
+          <select
+            value={form.tasksChartStyle}
+            onChange={(e) => setForm((s) => ({ ...s, tasksChartStyle: e.target.value }))}
+            className={selectClass}
+          >
+            {field.options.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      );
+    case 'numberMetric':
+      return (
+        <div className="space-y-4">
+          <div>
+            <span className="block text-sm font-medium text-gray-700 mb-2">Source</span>
+            <div className="flex gap-4 text-sm">
+              <label className="inline-flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="metricMode"
+                  checked={form.metricMode === 'static'}
+                  onChange={() => setForm((s) => ({ ...s, metricMode: 'static' }))}
+                />
+                Static value
+              </label>
+              <label className="inline-flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="metricMode"
+                  checked={form.metricMode === 'live'}
+                  onChange={() => setForm((s) => ({ ...s, metricMode: 'live' }))}
+                />
+                Workspace metric
+              </label>
+            </div>
+          </div>
+          {form.metricMode === 'live' ? (
+            <div className="space-y-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">Metric</label>
+                <select
+                  value={form.liveMetric}
+                  onChange={(e) => setForm((s) => ({ ...s, liveMetric: e.target.value }))}
+                  className={selectClass}
+                >
+                  {LIVE_METRIC_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <Input
+                label="Label (optional)"
+                value={form.metricLabel}
+                onChange={(e) => setForm((s) => ({ ...s, metricLabel: e.target.value }))}
+                placeholder="Overrides default label"
+              />
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                  Display format
+                </label>
+                <select
+                  value={form.displayFormat}
+                  onChange={(e) => setForm((s) => ({ ...s, displayFormat: e.target.value }))}
+                  className={selectClass}
+                >
+                  <option value="">Default</option>
+                  <option value="integer">Integer</option>
+                  <option value="decimal">Decimal (1 place)</option>
+                  <option value="percent">Percent (whole)</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">Mini chart</label>
+                <select
+                  value={form.chartMode}
+                  onChange={(e) => setForm((s) => ({ ...s, chartMode: e.target.value }))}
+                  className={selectClass}
+                >
+                  <option value="">None</option>
+                  <option value="sparkline">Weekly completions sparkline</option>
+                </select>
+              </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-3">
+              <Input
+                label="Value"
+                value={form.metricValue}
+                onChange={(e) => setForm((s) => ({ ...s, metricValue: e.target.value }))}
+                type="number"
+              />
+              <Input
+                label="Label"
+                value={form.metricLabel}
+                onChange={(e) => setForm((s) => ({ ...s, metricLabel: e.target.value }))}
+              />
+              <div className="col-span-2">
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                  Display format
+                </label>
+                <select
+                  value={form.displayFormat}
+                  onChange={(e) => setForm((s) => ({ ...s, displayFormat: e.target.value }))}
+                  className={selectClass}
+                >
+                  <option value="">Default</option>
+                  <option value="integer">Integer</option>
+                  <option value="decimal">Decimal</option>
+                  <option value="percent">Percent</option>
+                </select>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    case 'agentSlot':
+      return (
+        <div className="space-y-3">
+          <Input
+            label="Slot key"
+            value={form.agentSlotKey}
+            onChange={(e) => setForm((s) => ({ ...s, agentSlotKey: e.target.value }))}
+            placeholder="primary"
+          />
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+            <textarea
+              value={form.agentDescription}
+              onChange={(e) => setForm((s) => ({ ...s, agentDescription: e.target.value }))}
+              rows={2}
+              className={clsx(selectClass, 'resize-y')}
+            />
+          </div>
+        </div>
+      );
+    default:
+      return null;
+  }
+}
 
 export function AddWidgetModal({
   isOpen,
@@ -56,12 +258,7 @@ export function AddWidgetModal({
 }: AddWidgetModalProps) {
   const [title, setTitle] = useState('');
   const [type, setType] = useState<DashboardWidgetType>('TASKS_BY_STATUS');
-  const [projectId, setProjectId] = useState('');
-  const [portfolioId, setPortfolioId] = useState('');
-  const [velocityTake, setVelocityTake] = useState('6');
-  const [noteBody, setNoteBody] = useState('');
-  const [metricValue, setMetricValue] = useState('0');
-  const [metricLabel, setMetricLabel] = useState('Open bugs');
+  const [form, setForm] = useState<WidgetCreationFormState>(defaultWidgetCreationFormState);
   const { data: projects } = useProjects(workspaceId);
   const { data: portfolios } = usePortfolios(workspaceId);
   const { mutateAsync: addWidget, isPending, error, reset } = useAddDashboardWidget();
@@ -70,64 +267,28 @@ export function AddWidgetModal({
     if (!isOpen) {
       setTitle('');
       setType('TASKS_BY_STATUS');
-      setProjectId('');
-      setPortfolioId('');
-      setVelocityTake('6');
-      setNoteBody('');
-      setMetricValue('0');
-      setMetricLabel('Open bugs');
+      setForm(defaultWidgetCreationFormState());
       reset();
     }
   }, [isOpen, reset]);
 
-  const defaultTitle = () => {
-    const t = TYPES.find((x) => x.value === type);
-    return t?.label ?? 'Widget';
-  };
+  const spec = getWidgetCreationSpec(type);
+
+  const defaultTitle = () => spec.label;
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (!spec.canSubmit(form)) return;
     const widgetTitle = title.trim() || defaultTitle();
-    let config: Record<string, unknown> = {};
-    if ((type === 'PROJECT_SUMMARY' || type === 'PROJECT_CFD') && projectId) {
-      config = { projectId };
-    }
-    if (
-      (type === 'PORTFOLIO_ACTIVE_SPRINTS' || type === 'PORTFOLIO_SPRINT_VELOCITY') &&
-      portfolioId
-    ) {
-      config = { portfolioId };
-      if (type === 'PORTFOLIO_SPRINT_VELOCITY') {
-        const n = parseInt(velocityTake, 10);
-        config = { portfolioId, take: Number.isFinite(n) ? Math.min(12, Math.max(1, n)) : 6 };
-      }
-    }
-    if (type === 'TEXT_NOTE') config = { body: noteBody };
-    if (type === 'NUMBER_METRIC') {
-      config = { value: Number(metricValue) || 0, label: metricLabel };
-    }
-    if (type === 'AGENT_SLOT') config = { slotKey: 'primary', description: 'Awaiting agent run.' };
-
+    const config = spec.buildConfig(form);
     try {
       await addWidget({
         workspaceId,
         dashboardId,
         type,
         title: widgetTitle,
-        gridW:
-          type === 'TASKS_BY_STATUS' ||
-          type === 'PROJECT_CFD' ||
-          type === 'PORTFOLIO_ACTIVE_SPRINTS' ||
-          type === 'PORTFOLIO_SPRINT_VELOCITY'
-            ? 6
-            : 4,
-        gridH:
-          type === 'TASKS_BY_STATUS' ||
-          type === 'PROJECT_CFD' ||
-          type === 'PORTFOLIO_ACTIVE_SPRINTS' ||
-          type === 'PORTFOLIO_SPRINT_VELOCITY'
-            ? 3
-            : 2,
+        gridW: spec.gridW,
+        gridH: spec.gridH,
         config,
       });
       onClose();
@@ -152,11 +313,14 @@ export function AddWidgetModal({
             onChange={(e) => setType(e.target.value as DashboardWidgetType)}
             className={selectClass}
           >
-            {TYPES.map((t) => (
-              <option key={t.value} value={t.value}>
-                {t.label} — {t.hint}
-              </option>
-            ))}
+            {WIDGET_TYPE_ORDER.map((t) => {
+              const s = getWidgetCreationSpec(t);
+              return (
+                <option key={t} value={t}>
+                  {s.label} — {s.hint}
+                </option>
+              );
+            })}
           </select>
         </div>
         <Input
@@ -166,84 +330,18 @@ export function AddWidgetModal({
           placeholder={defaultTitle()}
         />
 
-        {(type === 'PROJECT_SUMMARY' || type === 'PROJECT_CFD') && (
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1.5">Project</label>
-            <select
-              value={projectId}
-              onChange={(e) => setProjectId(e.target.value)}
-              className={selectClass}
-              required
-            >
-              <option value="">Select project…</option>
-              {(projects ?? []).map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
-
-        {(type === 'PORTFOLIO_ACTIVE_SPRINTS' || type === 'PORTFOLIO_SPRINT_VELOCITY') && (
-          <div className="space-y-3">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1.5">Portfolio</label>
-              <select
-                value={portfolioId}
-                onChange={(e) => setPortfolioId(e.target.value)}
-                className={selectClass}
-                required
-              >
-                <option value="">Select portfolio…</option>
-                {(portfolios ?? []).map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-            {type === 'PORTFOLIO_SPRINT_VELOCITY' && (
-              <Input
-                label="Sprints in average (1–12)"
-                value={velocityTake}
-                onChange={(e) => setVelocityTake(e.target.value)}
-                type="number"
-                min={1}
-                max={12}
-              />
-            )}
-          </div>
-        )}
-
-        {type === 'TEXT_NOTE' && (
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Note</label>
-            <textarea
-              value={noteBody}
-              onChange={(e) => setNoteBody(e.target.value)}
-              rows={4}
-              className={clsx(selectClass, 'resize-y')}
-              placeholder="Context for the team…"
+        <div className="space-y-4">
+          {spec.fields.map((field) => (
+            <WidgetFieldRenderer
+              key={`${field.key}-${field.kind}`}
+              field={field}
+              form={form}
+              setForm={setForm}
+              projects={projects}
+              portfolios={portfolios}
             />
-          </div>
-        )}
-
-        {type === 'NUMBER_METRIC' && (
-          <div className="grid grid-cols-2 gap-3">
-            <Input
-              label="Value"
-              value={metricValue}
-              onChange={(e) => setMetricValue(e.target.value)}
-              type="number"
-            />
-            <Input
-              label="Label"
-              value={metricLabel}
-              onChange={(e) => setMetricLabel(e.target.value)}
-            />
-          </div>
-        )}
+          ))}
+        </div>
 
         {errMsg && <p className="text-sm text-red-600">{errMsg}</p>}
 
@@ -251,15 +349,7 @@ export function AddWidgetModal({
           <Button type="button" variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button
-            type="submit"
-            loading={isPending}
-            disabled={
-              ((type === 'PROJECT_SUMMARY' || type === 'PROJECT_CFD') && !projectId) ||
-              ((type === 'PORTFOLIO_ACTIVE_SPRINTS' || type === 'PORTFOLIO_SPRINT_VELOCITY') &&
-                !portfolioId)
-            }
-          >
+          <Button type="submit" loading={isPending} disabled={!spec.canSubmit(form)}>
             Add widget
           </Button>
         </div>

@@ -8,6 +8,6 @@ import { PrismaService } from '../common/prisma.service';
 @Module({
   controllers: [PmController],
   providers: [PmService, PmOrchestratorGuard, PmCrewService, PrismaService],
-  exports: [PmService],
+  exports: [PmService, PmCrewService],
 })
 export class PmModule {}

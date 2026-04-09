@@ -3,7 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { PrismaService } from './common/prisma.service';
-import { EventsGateway } from './common/events.gateway';
+import { CommonModule } from './common/common.module';
 import { AuthModule } from './auth/auth.module';
 import { WorkspaceModule } from './workspace/workspace.module';
 import { TeamModule } from './team/team.module';
@@ -26,9 +26,12 @@ import { ActivityLogModule } from './activity-log/activity-log.module';
 import { AttachmentModule } from './attachment/attachment.module';
 import { SearchModule } from './search/search.module';
 import { OutboundWebhookModule } from './outbound-webhook/outbound-webhook.module';
+import { CronModule } from './cron/cron.module';
+import { WorkScheduleModule } from './schedule/schedule.module';
 
 @Module({
   imports: [
+    CommonModule,
     ConfigModule.forRoot({
       isGlobal: true,
       envFilePath: ['.env', '.env.local'],
@@ -59,8 +62,10 @@ import { OutboundWebhookModule } from './outbound-webhook/outbound-webhook.modul
     SearchModule,
     PmModule,
     OutboundWebhookModule,
+    CronModule,
+    WorkScheduleModule,
   ],
-  providers: [PrismaService, EventsGateway],
-  exports: [PrismaService, EventsGateway],
+  providers: [PrismaService],
+  exports: [PrismaService],
 })
 export class AppModule {}

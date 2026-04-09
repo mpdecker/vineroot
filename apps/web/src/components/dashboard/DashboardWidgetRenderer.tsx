@@ -1,40 +1,50 @@
-import type { DashboardWidget as DW } from '../../types';
+import type { ComponentType } from 'react';
+import type { DashboardWidget as DW, DashboardWidgetType } from '../../types';
+import { WIDGET_TYPE_ORDER } from './widget-creation-params';
 import { TasksByStatusWidget } from './widgets/TasksByStatusWidget';
 import { ProjectSummaryWidget } from './widgets/ProjectSummaryWidget';
 import { NumberMetricWidget } from './widgets/NumberMetricWidget';
 import { AgentSlotWidget } from './widgets/AgentSlotWidget';
 import { TextNoteWidget } from './widgets/TextNoteWidget';
 import { ProjectCfdWidget } from './widgets/ProjectCfdWidget';
+import { ProjectEvmWidget } from './widgets/ProjectEvmWidget';
 import { PortfolioActiveSprintsWidget } from './widgets/PortfolioActiveSprintsWidget';
 import { PortfolioSprintVelocityWidget } from './widgets/PortfolioSprintVelocityWidget';
+
+const KNOWN_WIDGET_TYPES = new Set<string>(WIDGET_TYPE_ORDER);
+
+/** Coerce API/JSON values (trimmed strings, boxed String objects) to a known widget type. */
+export function normalizeDashboardWidgetType(raw: unknown): DashboardWidgetType | null {
+  if (raw == null) return null;
+  const s = typeof raw === 'string' ? raw.trim() : String(raw).trim();
+  return KNOWN_WIDGET_TYPES.has(s) ? (s as DashboardWidgetType) : null;
+}
+
+const WIDGET_COMPONENTS: Record<DashboardWidgetType, ComponentType<{ widget: DW }>> = {
+  TASKS_BY_STATUS: TasksByStatusWidget,
+  PROJECT_SUMMARY: ProjectSummaryWidget,
+  PROJECT_CFD: ProjectCfdWidget,
+  PROJECT_EVM: ProjectEvmWidget,
+  PORTFOLIO_ACTIVE_SPRINTS: PortfolioActiveSprintsWidget,
+  PORTFOLIO_SPRINT_VELOCITY: PortfolioSprintVelocityWidget,
+  NUMBER_METRIC: NumberMetricWidget,
+  AGENT_SLOT: AgentSlotWidget,
+  TEXT_NOTE: TextNoteWidget,
+};
 
 export interface DashboardWidgetRendererProps {
   widget: DW;
 }
 
 export function DashboardWidgetRenderer({ widget }: DashboardWidgetRendererProps) {
-  switch (widget.type) {
-    case 'TASKS_BY_STATUS':
-      return <TasksByStatusWidget widget={widget} />;
-    case 'PROJECT_SUMMARY':
-      return <ProjectSummaryWidget widget={widget} />;
-    case 'PROJECT_CFD':
-      return <ProjectCfdWidget widget={widget} />;
-    case 'PORTFOLIO_ACTIVE_SPRINTS':
-      return <PortfolioActiveSprintsWidget widget={widget} />;
-    case 'PORTFOLIO_SPRINT_VELOCITY':
-      return <PortfolioSprintVelocityWidget widget={widget} />;
-    case 'NUMBER_METRIC':
-      return <NumberMetricWidget widget={widget} />;
-    case 'AGENT_SLOT':
-      return <AgentSlotWidget widget={widget} />;
-    case 'TEXT_NOTE':
-      return <TextNoteWidget widget={widget} />;
-    default:
-      return (
-        <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-          Unknown widget type: {(widget as DW).type}
-        </div>
-      );
+  const type = normalizeDashboardWidgetType(widget.type);
+  if (!type) {
+    return (
+      <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+        Unknown widget type: {String(widget.type ?? '')}
+      </div>
+    );
   }
+  const Comp = WIDGET_COMPONENTS[type];
+  return <Comp widget={widget} />;
 }

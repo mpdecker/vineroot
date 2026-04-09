@@ -1,11 +1,14 @@
 import { useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, Plus, Trash2 } from 'lucide-react';
+import { ArrowLeft, Copy, LayoutGrid, Plus, Trash2 } from 'lucide-react';
 import { useWorkspaceStore } from '../../stores/workspace.store';
 import {
+  useApplyDashboardLayoutPreset,
   useDashboard,
+  useDashboardLayoutPresets,
   useDeleteDashboard,
   useDeleteDashboardWidget,
+  useDuplicateDashboard,
 } from '../../hooks/useDashboards';
 import { DashboardWidgetRenderer } from '../../components/dashboard/DashboardWidgetRenderer';
 import { AddWidgetModal } from '../../components/dashboard/AddWidgetModal';
@@ -23,7 +26,12 @@ export default function DashboardDetailPage() {
   });
   const { mutateAsync: deleteDashboard, isPending: deletingDash } = useDeleteDashboard();
   const { mutateAsync: deleteWidget, isPending: deletingWidget } = useDeleteDashboardWidget();
+  const { mutateAsync: duplicateDashboard, isPending: duplicating } = useDuplicateDashboard();
+  const { mutateAsync: applyLayoutPreset, isPending: applyingPreset } =
+    useApplyDashboardLayoutPreset();
+  const { data: layoutPresets } = useDashboardLayoutPresets(workspaceId || undefined);
   const [addOpen, setAddOpen] = useState(false);
+  const [layoutPresetId, setLayoutPresetId] = useState('');
 
   const sortedWidgets = useMemo(() => {
     const w = dashboard?.widgets ?? [];
@@ -52,6 +60,39 @@ export default function DashboardDetailPage() {
       widgetId: w.id,
     });
   };
+
+  const handleDuplicateDashboard = async () => {
+    if (!dashboard || !workspaceId) return;
+    const suggested = `${dashboard.name} (copy)`;
+    const name = window.prompt('Name for the copy', suggested);
+    if (name === null) return;
+    const d = await duplicateDashboard({
+      workspaceId,
+      dashboardId: dashboard.id,
+      name: name.trim() || undefined,
+    });
+    navigate(`/dashboards/${d.id}?ws=${encodeURIComponent(workspaceId)}`);
+  };
+
+  const handleApplyLayoutPreset = async () => {
+    if (!dashboard || !workspaceId || !layoutPresetId) return;
+    if (
+      !confirm(
+        'Apply this layout? Widget positions and order will change to match the preset.',
+      )
+    ) {
+      return;
+    }
+    await applyLayoutPreset({
+      workspaceId,
+      dashboardId: dashboard.id,
+      presetId: layoutPresetId,
+    });
+    setLayoutPresetId('');
+  };
+
+  const selectClass =
+    'px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white min-w-[10rem]';
 
   if (!workspaceId) {
     return (
@@ -99,9 +140,43 @@ export default function DashboardDetailPage() {
             <p className="text-gray-600 mt-1 max-w-2xl">{dashboard.description}</p>
           )}
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button type="button" icon={<Plus className="w-4 h-4" />} onClick={() => setAddOpen(true)}>
             Add widget
+          </Button>
+          <div className="flex flex-wrap items-center gap-2 border-l border-gray-200 pl-2 ml-1">
+            <LayoutGrid className="w-4 h-4 text-gray-500 hidden sm:block" aria-hidden />
+            <select
+              value={layoutPresetId}
+              onChange={(e) => setLayoutPresetId(e.target.value)}
+              className={selectClass}
+              aria-label="Layout preset"
+            >
+              <option value="">Layout preset…</option>
+              {(layoutPresets ?? []).map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={!layoutPresetId || applyingPreset}
+              loading={applyingPreset}
+              onClick={() => void handleApplyLayoutPreset()}
+            >
+              Apply layout
+            </Button>
+          </div>
+          <Button
+            type="button"
+            variant="secondary"
+            icon={<Copy className="w-4 h-4" />}
+            onClick={() => void handleDuplicateDashboard()}
+            loading={duplicating}
+          >
+            Duplicate
           </Button>
           <Button
             type="button"

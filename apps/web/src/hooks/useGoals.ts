@@ -77,3 +77,18 @@ export function useCreateGoalMetric(workspaceId: string | undefined) {
     },
   });
 }
+
+export function useRecomputeGoalMetric(workspaceId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (metricId: string) => {
+      const res = await api.post<GoalDto>(
+        `/workspaces/${workspaceId}/goals/metrics/${metricId}/recompute`,
+      );
+      return res.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['goals', workspaceId] });
+    },
+  });
+}

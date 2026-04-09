@@ -10,9 +10,10 @@ import { WorkspaceGuard } from '../auth/guards';
 import { ActivityLogModule } from '../activity-log/activity-log.module';
 import { AttachmentModule } from '../attachment/attachment.module';
 import { IntakeRecaptchaService } from './intake-recaptcha.service';
+import { CustomFieldModule } from '../custom-field/custom-field.module';
 
 @Module({
-  imports: [TaskModule, ActivityLogModule, AttachmentModule],
+  imports: [TaskModule, ActivityLogModule, AttachmentModule, CustomFieldModule],
   controllers: [
     ProjectController,
     ProjectResourceController,

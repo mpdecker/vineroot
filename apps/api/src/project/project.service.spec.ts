@@ -8,7 +8,8 @@ import { ProjectService } from './project.service';
 import { PrismaService } from '../common/prisma.service';
 import { TaskService } from '../task/task.service';
 import { TaskActivityLogService } from '../activity-log/task-activity-log.service';
-import { ProjectColor, ProjectStatus } from '@vineroot/shared-types';
+import { CustomFieldRollupService } from '../custom-field/custom-field-rollup.service';
+import { ProjectColor, ProjectStatus, type ProjectSavedViewConfigDto } from '@vineroot/shared-types';
 import { TaskStatus } from '@prisma/client';
 import {
   calendarDayToIsoKey,
@@ -61,6 +62,9 @@ describe('ProjectService', () => {
       findUnique: jest.fn(),
       update: jest.fn(),
     },
+    workCalendar: {
+      findFirst: jest.fn().mockResolvedValue(null),
+    },
     $transaction: jest.fn(),
   };
 
@@ -70,6 +74,10 @@ describe('ProjectService', () => {
 
   const taskActivityLog = {
     log: jest.fn().mockResolvedValue(undefined),
+  };
+
+  const customFieldRollupService = {
+    mergeRollupsIntoProjectTree: jest.fn().mockResolvedValue(undefined),
   };
 
   const now = new Date();
@@ -116,6 +124,10 @@ describe('ProjectService', () => {
         { provide: PrismaService, useValue: prisma },
         { provide: TaskService, useValue: taskService },
         { provide: TaskActivityLogService, useValue: taskActivityLog },
+        {
+          provide: CustomFieldRollupService,
+          useValue: customFieldRollupService,
+        },
       ],
     }).compile();
 
@@ -650,6 +662,66 @@ describe('ProjectService', () => {
       expect(result.days[0].ideal).toBe(10);
       expect(result.days[1].remaining).toBe(3);
     });
+
+    it('from/to returns a slice of days with ideal from full-sprint index', async () => {
+      const sprintStart = new Date(2024, 5, 10);
+      const sprintEnd = new Date(2024, 5, 12);
+      const midDay = eachCalendarDayInclusive(sprintStart, sprintEnd)[1];
+      const midKey = calendarDayToIsoKey(midDay);
+
+      prisma.sprint.findFirst.mockResolvedValue({
+        id: 'sp-1',
+        projectId: 'proj-1',
+        name: 'S',
+        goal: null,
+        startDate: sprintStart,
+        endDate: sprintEnd,
+        state: 'ACTIVE',
+        sortOrder: 0,
+        createdAt: now,
+        updatedAt: now,
+      });
+      prisma.task.findMany.mockResolvedValue([
+        {
+          status: TaskStatus.IN_PROGRESS,
+          storyPoints: 6,
+          completedAt: null,
+          updatedAt: now,
+        },
+      ]);
+
+      const result = await service.getSprintBurndown(
+        'proj-1',
+        'sp-1',
+        'user-1',
+        midKey,
+        midKey,
+      );
+
+      expect(result.days).toHaveLength(1);
+      expect(result.days[0].date).toBe(midKey);
+      expect(result.days[0].ideal).toBe(3);
+      expect(result.totalScope).toBe(6);
+    });
+
+    it('throws BadRequest for invalid from', async () => {
+      prisma.sprint.findFirst.mockResolvedValue({
+        id: 'sp-1',
+        projectId: 'proj-1',
+        name: 'S',
+        goal: null,
+        startDate: new Date(2024, 5, 10),
+        endDate: new Date(2024, 5, 11),
+        state: 'ACTIVE',
+        sortOrder: 0,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      await expect(
+        service.getSprintBurndown('proj-1', 'sp-1', 'user-1', 'bogus'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
   });
 
   describe('getSprintBurnup', () => {
@@ -1009,6 +1081,68 @@ describe('ProjectService', () => {
       expect(prisma.sprint.findMany).toHaveBeenLastCalledWith(
         expect.objectContaining({ take: 12 }),
       );
+    });
+  });
+
+  describe('normalizeSavedViewConfig', () => {
+    function norm(raw: unknown): ProjectSavedViewConfigDto {
+      return (
+        service as unknown as {
+          normalizeSavedViewConfig: (r: unknown) => ProjectSavedViewConfigDto;
+        }
+      ).normalizeSavedViewConfig(raw);
+    }
+
+    it('accepts timephased surface and timephased* fields', () => {
+      expect(
+        norm({
+          surface: 'timephased',
+          sprintFilter: 'all',
+          timephasedGranularity: 'day',
+          timephasedBasis: 'working',
+          timephasedGridMode: 'resource_usage',
+        }),
+      ).toEqual({
+        surface: 'timephased',
+        sprintFilter: 'all',
+        timephasedGranularity: 'day',
+        timephasedBasis: 'working',
+        timephasedGridMode: 'resource_usage',
+      });
+    });
+
+    it('accepts network surface', () => {
+      expect(
+        norm({
+          surface: 'network',
+          epicFilter: 'all',
+        }),
+      ).toEqual({ surface: 'network', epicFilter: 'all' });
+    });
+
+    it('strips invalid timephasedGridMode and unknown surface values', () => {
+      expect(
+        norm({
+          surface: 'timephased',
+          timephasedGridMode: 'invalid',
+        }),
+      ).toEqual({ surface: 'timephased' });
+      expect(
+        norm({
+          surface: 'not-a-real-surface',
+          timephasedGranularity: 'week',
+        }),
+      ).toEqual({ timephasedGranularity: 'week' });
+    });
+
+    it('ignores malformed timephasedGranularity and basis', () => {
+      expect(
+        norm({
+          surface: 'timephased',
+          timephasedGranularity: 'hourly',
+          timephasedBasis: 'maybe',
+        }),
+      ).toEqual({ surface: 'timephased' });
     });
   });
 

@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { DashboardWidgetRenderer } from './DashboardWidgetRenderer';
+import {
+  DashboardWidgetRenderer,
+  normalizeDashboardWidgetType,
+} from './DashboardWidgetRenderer';
 import type { DashboardWidget } from '../../types';
 
 const base = (over: Partial<DashboardWidget> = {}): DashboardWidget => ({
@@ -73,6 +76,21 @@ describe('DashboardWidgetRenderer (widget)', () => {
     expect(screen.getByText('Missing project')).toBeInTheDocument();
   });
 
+  it('renders PROJECT_EVM with resolved metrics', () => {
+    render(
+      <DashboardWidgetRenderer
+        widget={base({
+          type: 'PROJECT_EVM',
+          title: 'EVM',
+          resolved: { bac: 1000, pv: 400, ev: 350, ac: 380, spi: 0.875, cpi: 0.921, eac: 1084 },
+        })}
+      />,
+    );
+    expect(screen.getByText('EVM')).toBeInTheDocument();
+    expect(screen.getByText('BAC')).toBeInTheDocument();
+    expect(screen.getByText('1,000')).toBeInTheDocument();
+  });
+
   it('renders PROJECT_CFD with resolved days', () => {
     render(
       <DashboardWidgetRenderer
@@ -92,6 +110,11 @@ describe('DashboardWidgetRenderer (widget)', () => {
     );
     expect(screen.getByText('Flow')).toBeInTheDocument();
     expect(screen.getByRole('img', { name: /cumulative flow diagram/i })).toBeInTheDocument();
+  });
+
+  it('normalizes padded widget type strings', () => {
+    expect(normalizeDashboardWidgetType('  PROJECT_EVM  ')).toBe('PROJECT_EVM');
+    expect(normalizeDashboardWidgetType(new String('PROJECT_EVM'))).toBe('PROJECT_EVM');
   });
 
   it('shows unknown type fallback', () => {

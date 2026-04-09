@@ -2,12 +2,15 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import { Notification } from '../types';
 
-export function useNotifications() {
+export function useNotifications(unreadOnly?: boolean) {
   return useQuery({
-    queryKey: ['notifications'],
+    queryKey: ['notifications', unreadOnly],
     queryFn: async () => {
-      const res = await api.get<{ notifications: Notification[]; unreadCount: number }>('/notifications');
-      return res.data.notifications;
+      const q = unreadOnly === true ? '?unreadOnly=true' : '';
+      const res = await api.get<{ notifications: Notification[]; unreadCount: number }>(
+        `/notifications${q}`,
+      );
+      return res.data;
     },
     refetchInterval: 30_000,
   });

@@ -123,6 +123,44 @@ enum DependencyType {
   WAITING_ON
 }
 
+/// CPM link type (Microsoft Project FS/SS/FF/SF). Drives schedule engine; legacy deps default to FS.
+enum ScheduleLinkType {
+  FS
+  SS
+  FF
+  SF
+}
+
+/// Task schedule constraint (MSP-style).
+enum TaskConstraintType {
+  ASAP
+  ALAP
+  SNET
+  SNLT
+  MSO
+  MFO
+}
+
+/// Fixed-units / fixed-work / fixed-duration; MANUAL = engine does not move dates unless user clears manual flag per task.
+enum TaskScheduleMode {
+  MANUAL
+  FIXED_UNITS
+  FIXED_WORK
+  FIXED_DURATION
+}
+
+/// MS Project–style work distribution for timephased grids only (CPM unchanged).
+enum TaskWorkContour {
+  FLAT
+  FRONT_LOADED
+  BACK_LOADED
+  BELL
+  DOUBLE_PEAK
+  TURTLE
+  EARLY_PEAK
+  LATE_PEAK
+}
+
 /// Scrum/Kanban-style work classification (epics often use parentTaskId for children).
 enum TaskWorkItemType {
   TASK
@@ -155,6 +193,20 @@ enum CustomFieldType {
   MULTI_SELECT
   PERSON
   URL
+}
+
+/// Stored on CustomFieldDefinition — NONE = user-editable; SUBTASK_ROLLUP_NUMBER = read-only aggregate over descendant tasks.
+enum CustomFieldComputedKind {
+  NONE
+  SUBTASK_ROLLUP_NUMBER
+}
+
+enum CustomFieldRollupAggregation {
+  SUM
+  AVG
+  MIN
+  MAX
+  COUNT
 }
 
 enum GoalMetricType {
@@ -249,9 +301,16 @@ model User {
   isAgent       Boolean  @default(false)
   agentTier     ActorTier?
   timezone      String   @default("UTC")
+  /// Optional override calendar for workload / leveling (CPM uses project calendar first).
+  workCalendarId String?
+  /// Default cost rate for EVM when assigned to tasks (per hour).
+  resourceStandardRatePerHour   Decimal? @db.Decimal(14, 4)
+  resourceOvertimeRatePerHour   Decimal? @db.Decimal(14, 4)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
   deletedAt     DateTime?
+
+  workCalendar WorkCalendar? @relation("UserWorkCalendar", fields: [workCalendarId], references: [id], onDelete: SetNull)
 
   workspaceMembers   WorkspaceMember[]
   teamMembers        TeamMember[]
@@ -268,8 +327,10 @@ model User {
   refreshTokens      RefreshToken[]
   goals              Goal[]
   createdDashboards  Dashboard[]
+  reportingSavedViews ReportingSavedView[]
   projectSavedViews  ProjectSavedView[]
   commentMentions    CommentMention[]
+  taskCostEntriesCreated TaskCostEntry[] @relation("TaskCostEntryCreator")
   intakeFormsCreated ProjectIntakeForm[] @relation("IntakeFormCreator")
 
   @@index([email])
@@ -313,9 +374,85 @@ model Workspace {
   agentTokens AgentToken[]
   dashboards  Dashboard[]
   outboundWebhooks WorkspaceOutboundWebhook[]
+  reportingSavedViews ReportingSavedView[]
+  workCalendars   WorkCalendar[]
+  schedulePrograms ScheduleProgram[]
+  genericResources GenericResource[]
 
   @@index([slug])
   @@index([deletedAt])
+}
+
+/// Working-time calendar for CPM (weekly pattern + exceptions). Lag on dependencies counts in working days when a calendar is set.
+model WorkCalendar {
+  id            String   @id @default(cuid())
+  workspaceId String
+  name        String
+  timeZone    String   @default("UTC")
+  /// JSON: { "mon"|"tue"|... }: minutes per day (0 = non-working). Default seed: Mon–Fri 480.
+  weeklyPattern Json   @default("{\"mon\":480,\"tue\":480,\"wed\":480,\"thu\":480,\"fri\":480,\"sat\":0,\"sun\":0}")
+  /// JSON: [{ "date": "YYYY-MM-DD", "workingMinutes": number }]
+  exceptions  Json     @default("[]")
+  isDefault   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  projects  Project[]
+  users     User[]    @relation("UserWorkCalendar")
+  tasks     Task[]    @relation("TaskWorkCalendar")
+  genericResources GenericResource[] @relation("GenericResourceWorkCalendar")
+
+  @@index([workspaceId])
+}
+
+/// Named non-user resource (equipment, role bucket) for MSP-style assignments and leveling buckets.
+model GenericResource {
+  id               String   @id @default(cuid())
+  workspaceId      String
+  name             String
+  /// Max simultaneous allocation % across tasks in a period (default 100 = one unit).
+  maxUnitsPercent  Float    @default(100)
+  /// Optional standard cost rate per hour for EVM / roll-up (same currency as user rates).
+  standardRatePerHour Decimal? @db.Decimal(14, 4)
+  /// Optional resource calendar for capacity (intersected with project calendar in overload math).
+  workCalendarId   String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workCalendar WorkCalendar? @relation("GenericResourceWorkCalendar", fields: [workCalendarId], references: [id], onDelete: SetNull)
+  assignments  TaskGenericResourceAssignment[]
+
+  @@index([workspaceId])
+  @@index([workCalendarId])
+}
+
+/// Program container for cross-project dependencies and portfolio schedule roll-up (same workspace).
+model ScheduleProgram {
+  id          String   @id @default(cuid())
+  workspaceId String
+  name        String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  projects  ScheduleProgramProject[]
+
+  @@index([workspaceId])
+}
+
+model ScheduleProgramProject {
+  id        String   @id @default(cuid())
+  programId String
+  projectId String
+  createdAt DateTime @default(now())
+
+  program ScheduleProgram @relation(fields: [programId], references: [id], onDelete: Cascade)
+  project Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([programId, projectId])
+  @@index([projectId])
 }
 
 /// Outbound HTTPS webhooks (signed) for external integrations; event filter aligns with AutomationTriggerType values.
@@ -333,6 +470,23 @@ model WorkspaceOutboundWebhook {
   updatedAt   DateTime @updatedAt
 
   workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+}
+
+/// Saved filter presets for the workspace Reporting tab (JSON matches WorkspaceReportingFilters).
+model ReportingSavedView {
+  id          String   @id @default(cuid())
+  workspaceId String
+  createdById String
+  name        String
+  sortOrder   Int      @default(0)
+  config      Json     @default("{}")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy User      @relation(fields: [createdById], references: [id], onDelete: Cascade)
 
   @@index([workspaceId])
 }
@@ -361,7 +515,7 @@ model Dashboard {
 model DashboardWidget {
   id          String   @id @default(cuid())
   dashboardId String
-  /// TASKS_BY_STATUS | PROJECT_SUMMARY | PROJECT_CFD | PORTFOLIO_ACTIVE_SPRINTS | PORTFOLIO_SPRINT_VELOCITY | NUMBER_METRIC | AGENT_SLOT | TEXT_NOTE
+  /// TASKS_BY_STATUS | PROJECT_SUMMARY | PROJECT_CFD | PROJECT_EVM | PORTFOLIO_ACTIVE_SPRINTS | PORTFOLIO_SPRINT_VELOCITY | NUMBER_METRIC | AGENT_SLOT | TEXT_NOTE
   type        String
   title       String
   sortOrder   Int      @default(0)
@@ -451,12 +605,17 @@ model Project {
   defaultView String        @default("list")
   sortOrder   Int           @default(0)
   kanbanWipEnforcement KanbanWipEnforcement @default(OFF)
+  /// CPM: project working calendar; null = 8h Mon–Fri synthetic calendar.
+  workCalendarId       String?
+  /// New tasks default to manual schedule unless false (then engine can set dates).
+  defaultManualSchedule Boolean       @default(true)
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
   deletedAt   DateTime?
 
   team        Team?          @relation(fields: [teamId], references: [id])
   createdBy   User           @relation(fields: [createdById], references: [id])
+  workCalendar WorkCalendar? @relation(fields: [workCalendarId], references: [id], onDelete: SetNull)
   workspaceLinks ProjectWorkspace[]
   members     ProjectMember[]
   sections    Section[]
@@ -468,9 +627,11 @@ model Project {
   cfdSnapshots ProjectCfdSnapshot[]
   savedViews   ProjectSavedView[]
   intakeForm   ProjectIntakeForm?
+  scheduleProgramMemberships ScheduleProgramProject[]
 
   @@index([teamId])
   @@index([deletedAt])
+  @@index([workCalendarId])
 }
 
 model Sprint {
@@ -663,12 +824,49 @@ model Task {
   isTemplate   Boolean      @default(false)
   /// Timeline / planning: render as milestone (diamond) instead of a bar span.
   isMilestone  Boolean      @default(false)
+  /// When false, schedule recalculation may update startDate/dueDate from CPM.
+  isManuallyScheduled Boolean @default(true)
+  constraintType      TaskConstraintType @default(ASAP)
+  constraintDate      DateTime?
+  deadlineDate        DateTime?
+  /// Working-time duration for CPM (minutes). Null = infer from start/due or default one working day.
+  durationWorkingMinutes Int?
+  /// Total work (minutes) for fixed-work mode / EVM.
+  workMinutes         Int?
+  scheduleMode        TaskScheduleMode @default(MANUAL)
+  /// When true, fixed-work style duration shrinks as assignment units increase (MSP-style).
+  effortDriven        Boolean      @default(false)
+  /// Summary bar: dates roll up from direct subtasks on recalculate (min start / max finish).
+  isSummaryRollup     Boolean      @default(false)
+  /// MSP-style leveling priority (0–1000); lower values are delayed first when leveling. Default 500.
+  levelingPriority    Int          @default(500)
+  /// Working days this task was pushed by resource leveling (accumulated).
+  levelingDelayWorkingDays Int     @default(0)
+  /// When true, leveling may split this task once split-aware leveling exists; ordering hint today.
+  levelingCanSplit    Boolean      @default(false)
+  /// Optional task calendar; else first assignee user calendar, else project/workspace default.
+  workCalendarId      String?
+  /// 0–100 for EVM and tracking.
+  percentComplete     Float        @default(0)
+  /// Phase 7: optional split-task / contour segments for display (JSON array of { start, end, workMinutes? } ISO datetimes). CPM ignores; timeline draws multiple bars.
+  scheduleSegments    Json?
+  /// How work (and proportional cost) is spread across periods in GET …/schedule/timephased when there are no scheduleSegments; segments override contour.
+  workContour         TaskWorkContour @default(FLAT)
+  /// One-off task cost (currency units); stacks with labor / per-use assignment costs for BAC.
+  fixedCost           Decimal?     @db.Decimal(14, 4)
+  /// Overtime labor minutes (actuals); split across assignees by work share for OT rate in BAC/labor cost.
+  overtimeWorkMinutes Int?
+  /// When true, task is a budget / cap line for reporting; excluded from operating EVM totals (see budget rollup on GET …/evm).
+  isBudgetTask        Boolean      @default(false)
+  /// Recorded actual cost for EVM (AC). When null, AC defaults to EV at task level.
+  actualCost          Decimal?     @db.Decimal(14, 4)
   syncVersion  Int          @default(1)
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
   deletedAt    DateTime?
 
   project      Project?     @relation(fields: [projectId], references: [id])
+  workCalendar WorkCalendar? @relation("TaskWorkCalendar", fields: [workCalendarId], references: [id], onDelete: SetNull)
   sprint       Sprint?      @relation(fields: [sprintId], references: [id], onDelete: SetNull)
   section      Section?     @relation(fields: [sectionId], references: [id])
   createdBy    User         @relation("TaskCreator", fields: [createdById], references: [id])
@@ -679,6 +877,7 @@ model Task {
   epicTask     Task?        @relation("TaskEpicLink", fields: [epicTaskId], references: [id], onDelete: SetNull)
   tasksInEpic  Task[]       @relation("TaskEpicLink")
   assignees    TaskAssignee[]
+  genericResourceAssignments TaskGenericResourceAssignment[]
   dependencies TaskDependency[] @relation("DependentTask")
   blockedBy    TaskDependency[] @relation("BlockingTask")
   tags         TaskTag[]
@@ -687,10 +886,13 @@ model Task {
   customFieldValues CustomFieldValue[]
   activityLogs ActivityLog[]
   auditLogs    AuditLog[]
+  baselines    TaskBaseline[]
+  costEntries  TaskCostEntry[]
 
   @@index([projectId])
   @@index([sectionId])
   @@index([parentTaskId])
+  @@index([workCalendarId])
   @@index([status])
   @@index([dueDate])
   @@index([actorTier])
@@ -702,6 +904,12 @@ model TaskAssignee {
   id         String   @id @default(cuid())
   taskId     String
   userId     String
+  /// 1–100: allocation % for leveling / workload (MSP-style units).
+  unitsPercent Float  @default(100)
+  /// Optional assignment-level work (minutes); when set, cost/EVM uses this instead of task work × units.
+  workMinutes Int?
+  /// One-time fee per assignment row (e.g. per-use), added to task BAC / baseline cost.
+  costPerUse  Decimal? @db.Decimal(14, 4)
   assignedAt DateTime @default(now())
 
   task       Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
@@ -712,11 +920,34 @@ model TaskAssignee {
   @@index([userId])
 }
 
+model TaskGenericResourceAssignment {
+  id                String   @id @default(cuid())
+  taskId            String
+  genericResourceId String
+  unitsPercent      Float    @default(100)
+  /// One-time per-assignment fee (e.g. equipment per-use), added to task BAC / baseline cost.
+  costPerUse        Decimal? @db.Decimal(14, 4)
+  assignedAt        DateTime @default(now())
+
+  task            Task            @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  genericResource GenericResource @relation(fields: [genericResourceId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, genericResourceId])
+  @@index([taskId])
+  @@index([genericResourceId])
+}
+
 model TaskDependency {
   id            String         @id @default(cuid())
   dependentId   String
   blockingId    String
   type          DependencyType @default(WAITING_ON)
+  /// CPM link type; FS matches legacy finish-to-start semantics.
+  linkType      ScheduleLinkType @default(FS)
+  /// Working-day lag when project has WorkCalendar; else treated as calendar-day offset (legacy).
+  lagDays       Int            @default(0)
+  /// When true, lagDays counts calendar days in the successor time zone (MSP elapsed lag).
+  lagIsElapsed  Boolean        @default(false)
   createdAt     DateTime       @default(now())
 
   dependentTask Task @relation("DependentTask", fields: [dependentId], references: [id], onDelete: Cascade)
@@ -725,6 +956,39 @@ model TaskDependency {
   @@unique([dependentId, blockingId])
   @@index([dependentId])
   @@index([blockingId])
+}
+
+/// Optional cost ledger lines for a task; summed into EVM AC when `actualCost` is unset.
+model TaskCostEntry {
+  id            String   @id @default(cuid())
+  taskId        String
+  amount        Decimal  @db.Decimal(14, 4)
+  description   String?
+  entryDate     DateTime @default(now())
+  createdAt     DateTime @default(now())
+  createdById   String?
+
+  task      Task  @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  createdBy User? @relation("TaskCostEntryCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([taskId])
+}
+
+/// Saved baseline snapshots per task (indices 0–10; MSP-style multi-baseline).
+model TaskBaseline {
+  id                  String   @id @default(cuid())
+  taskId              String
+  baselineIndex       Int
+  baselineStart       DateTime?
+  baselineFinish      DateTime?
+  baselineWorkMinutes Int?
+  baselineCost         Decimal?  @db.Decimal(14, 4)
+  createdAt           DateTime  @default(now())
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, baselineIndex])
+  @@index([taskId])
 }
 
 // ─── COMMENT ──────────────────────────────────────────────────────────────────
@@ -820,13 +1084,24 @@ model CustomFieldDefinition {
   type        CustomFieldType
   options     Json?
   isRequired  Boolean         @default(false)
+  /// Admin-facing notes (shown in field picker / settings).
+  description String?
+  /// Default JSON payload for this field (UI + future task-create application).
+  defaultValue Json?
+  computedKind CustomFieldComputedKind @default(NONE)
+  /// For SUBTASK_ROLLUP_NUMBER: workspace NUMBER field to aggregate from descendant tasks.
+  rollupSourceFieldId String?
+  rollupAggregation   CustomFieldRollupAggregation?
   createdAt   DateTime        @default(now())
 
   workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   projectDefs ProjectCustomField[]
   values      CustomFieldValue[]
+  rollupSourceField CustomFieldDefinition?  @relation("CustomFieldRollupSource", fields: [rollupSourceFieldId], references: [id], onDelete: SetNull)
+  rollupDependents  CustomFieldDefinition[] @relation("CustomFieldRollupSource")
 
   @@index([workspaceId])
+  @@index([rollupSourceFieldId])
 }
 
 model ProjectCustomField {
@@ -918,6 +1193,10 @@ model GoalMetric {
   current    Float          @default(0)
   target     Float          @default(100)
   unit       String?
+  /// JSON metric definition (TASK_COUNT, CUSTOM_FIELD_SUM, EPIC_CHILDREN_PERCENT). Null = manual current only.
+  definition Json?
+  lastComputedAt DateTime?
+  lastError      String?
   updatedAt  DateTime       @updatedAt
 
   goal       Goal @relation(fields: [goalId], references: [id], onDelete: Cascade)

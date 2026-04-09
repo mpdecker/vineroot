@@ -136,8 +136,8 @@ These belong on **project** or **workspace dashboard** widgets once sprint + poi
 
 ## Explicit non-goals (near term)
 
-- Full **MS Project** parity (resource leveling, cost curves, baselines v1–v10).  
-- Replacing **Jira** workflow engines (complex post-functions).  
+- **MS Project “deep”** extras not yet built: ten baselines, split tasks, timephased grids, network (PERT) view, `.mpp` interchange, enterprise HR resource pool — see [`ms-project-parity.md`](./ms-project-parity.md) for what **is** implemented (calendars, CPM, baselines 0–2, EVM MVP, programs).
+- Replacing **Jira** workflow engines (complex post-functions).
 - **SAFe** program layers without prior epic/sprint shipping.
 
 ---

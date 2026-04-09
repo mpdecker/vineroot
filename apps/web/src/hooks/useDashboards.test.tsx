@@ -8,6 +8,11 @@ import {
   useDashboard,
   useCreateDashboard,
   useAddDashboardWidget,
+  useDashboardLayoutPresets,
+  useDashboardTemplates,
+  useCreateDashboardFromTemplate,
+  useDuplicateDashboard,
+  useApplyDashboardLayoutPreset,
 } from './useDashboards';
 import type { Dashboard } from '../types';
 
@@ -130,5 +135,78 @@ describe('useDashboards hooks', () => {
       title: 'Hello',
       config: { body: 'x' },
     });
+  });
+
+  it('useDashboardLayoutPresets fetches preset list', async () => {
+    mockedApi.get.mockResolvedValue({
+      data: { presets: [{ id: 'overview', name: 'Overview', description: '' }] },
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { result } = renderHook(() => useDashboardLayoutPresets('ws1'), {
+      wrapper: wrapper(client),
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(mockedApi.get).toHaveBeenCalledWith('/workspaces/ws1/dashboards/layout-presets');
+    expect(result.current.data?.[0]?.id).toBe('overview');
+  });
+
+  it('useDashboardTemplates fetches template list', async () => {
+    mockedApi.get.mockResolvedValue({
+      data: { templates: [{ id: 'blank', name: 'Blank', description: '' }] },
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { result } = renderHook(() => useDashboardTemplates('ws1'), {
+      wrapper: wrapper(client),
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(mockedApi.get).toHaveBeenCalledWith('/workspaces/ws1/dashboards/templates');
+  });
+
+  it('useCreateDashboardFromTemplate posts from-template', async () => {
+    mockedApi.post.mockResolvedValue({ data: sampleDash });
+    const client = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    const { result } = renderHook(() => useCreateDashboardFromTemplate(), {
+      wrapper: wrapper(client),
+    });
+    await result.current.mutateAsync({
+      workspaceId: 'ws1',
+      templateId: 'workspace_overview',
+      name: 'My board',
+    });
+    expect(mockedApi.post).toHaveBeenCalledWith('/workspaces/ws1/dashboards/from-template', {
+      templateId: 'workspace_overview',
+      name: 'My board',
+    });
+  });
+
+  it('useDuplicateDashboard posts duplicate', async () => {
+    mockedApi.post.mockResolvedValue({ data: { ...sampleDash, id: 'd2' } });
+    const client = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    const { result } = renderHook(() => useDuplicateDashboard(), { wrapper: wrapper(client) });
+    await result.current.mutateAsync({
+      workspaceId: 'ws1',
+      dashboardId: 'd1',
+      name: 'Copy name',
+    });
+    expect(mockedApi.post).toHaveBeenCalledWith('/workspaces/ws1/dashboards/d1/duplicate', {
+      name: 'Copy name',
+    });
+  });
+
+  it('useApplyDashboardLayoutPreset posts apply-layout-preset', async () => {
+    mockedApi.post.mockResolvedValue({ data: { ...sampleDash, widgets: [] } });
+    const client = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    const { result } = renderHook(() => useApplyDashboardLayoutPreset(), {
+      wrapper: wrapper(client),
+    });
+    await result.current.mutateAsync({
+      workspaceId: 'ws1',
+      dashboardId: 'd1',
+      presetId: 'overview',
+    });
+    expect(mockedApi.post).toHaveBeenCalledWith(
+      '/workspaces/ws1/dashboards/d1/apply-layout-preset',
+      { presetId: 'overview' },
+    );
   });
 });

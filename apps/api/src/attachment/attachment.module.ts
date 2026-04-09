@@ -23,6 +23,6 @@ import { ActivityLogModule } from '../activity-log/activity-log.module';
     AttachmentRetentionService,
     PrismaService,
   ],
-  exports: [AttachmentService],
+  exports: [AttachmentService, AttachmentRetentionService],
 })
 export class AttachmentModule {}

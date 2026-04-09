@@ -5,6 +5,7 @@ import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { clsx } from 'clsx';
 import type { Task } from '../../types';
+import type { TaskScheduleInsight } from '../../lib/taskScheduleInsight';
 import { ListSortableTaskRow } from '../task/ListSortableTaskRow';
 import { BoardSortableTaskCard } from './BoardSortableTaskCard';
 import { subtasksDropId } from '../../lib/projectTaskDnD';
@@ -56,6 +57,7 @@ function NestedListRow({
   onToggle,
   onSelectTask,
   onStatusChange,
+  getScheduleInsight,
 }: {
   task: Task;
   sectionId: string;
@@ -64,6 +66,7 @@ function NestedListRow({
   onToggle: (id: string) => void;
   onSelectTask: (taskId: string) => void;
   onStatusChange: (taskId: string, status: string) => void;
+  getScheduleInsight?: (task: Task) => TaskScheduleInsight | undefined;
 }) {
   const subs = [...(task.subtasks ?? [])].sort((a, b) => a.sortOrder - b.sortOrder);
   const hasSubs = subs.length > 0;
@@ -78,6 +81,7 @@ function NestedListRow({
         leading={expandToggle(hasSubs, isCollapsed, () => onToggle(task.id))}
         onSelect={onSelectTask}
         onStatusChange={onStatusChange}
+        scheduleInsight={getScheduleInsight?.(task)}
       />
       {hasSubs && !isCollapsed && (
         <SubtasksDropZone parentId={task.id}>
@@ -93,6 +97,7 @@ function NestedListRow({
                   onToggle={onToggle}
                   onSelectTask={onSelectTask}
                   onStatusChange={onStatusChange}
+                  getScheduleInsight={getScheduleInsight}
                 />
               ))}
             </div>
@@ -109,11 +114,13 @@ export function ProjectTaskNestedList({
   roots,
   onSelectTask,
   onStatusChange,
+  getScheduleInsight,
 }: {
   sectionId: string;
   roots: Task[];
   onSelectTask: (taskId: string) => void;
   onStatusChange: (taskId: string, status: string) => void;
+  getScheduleInsight?: (task: Task) => TaskScheduleInsight | undefined;
 }) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
 
@@ -143,6 +150,7 @@ export function ProjectTaskNestedList({
           onToggle={toggle}
           onSelectTask={onSelectTask}
           onStatusChange={onStatusChange}
+          getScheduleInsight={getScheduleInsight}
         />
       ))}
     </>

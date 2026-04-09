@@ -53,4 +53,34 @@ describe('timelineCriticalPath', () => {
     expect(path.has('1')).toBe(true);
     expect(path.has('2')).toBe(true);
   });
+
+  it('computeCriticalPathTaskIds prefers successor with larger lag (longer FS chain)', () => {
+    const t1 = task({ id: '1', dueDate: '2025-01-05T00:00:00.000Z', waitingOn: [] });
+    const shortLag = task({
+      id: '2',
+      dueDate: '2025-01-06T00:00:00.000Z',
+      waitingOn: [
+        {
+          blockingId: '1',
+          blockingTask: { id: '1', title: '', status: 'DONE' },
+          lagDays: 0,
+        } as any,
+      ],
+    });
+    const longLag = task({
+      id: '3',
+      dueDate: '2025-01-06T00:00:00.000Z',
+      waitingOn: [
+        {
+          blockingId: '1',
+          blockingTask: { id: '1', title: '', status: 'DONE' },
+          lagDays: 10,
+        } as any,
+      ],
+    });
+    const path = computeCriticalPathTaskIds([t1, shortLag, longLag]);
+    expect(path.has('1')).toBe(true);
+    expect(path.has('3')).toBe(true);
+    expect(path.has('2')).toBe(false);
+  });
 });

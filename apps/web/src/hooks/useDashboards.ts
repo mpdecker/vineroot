@@ -1,6 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import type {
+  DashboardLayoutPresetSummaryDto,
+  DashboardTemplateSummaryDto,
+} from '@vineroot/shared-types';
 import { api } from '../lib/api';
-import type { Dashboard, DashboardWidget, DashboardWidgetType } from '../types';
+import type {
+  Dashboard,
+  DashboardWidget,
+  DashboardWidgetType,
+} from '../types';
+
+export type DashboardLayoutPresetSummary = DashboardLayoutPresetSummaryDto;
+export type DashboardTemplateSummary = DashboardTemplateSummaryDto;
 
 export function useDashboards(workspaceId: string | undefined) {
   return useQuery({
@@ -29,6 +40,32 @@ export function useDashboard(
       return res.data;
     },
     enabled: !!workspaceId && !!dashboardId,
+  });
+}
+
+export function useDashboardLayoutPresets(workspaceId: string | undefined) {
+  return useQuery({
+    queryKey: ['dashboards', 'layout-presets', workspaceId],
+    queryFn: async () => {
+      const res = await api.get<{ presets: DashboardLayoutPresetSummaryDto[] }>(
+        `/workspaces/${workspaceId}/dashboards/layout-presets`,
+      );
+      return res.data.presets;
+    },
+    enabled: !!workspaceId,
+  });
+}
+
+export function useDashboardTemplates(workspaceId: string | undefined) {
+  return useQuery({
+    queryKey: ['dashboards', 'templates', workspaceId],
+    queryFn: async () => {
+      const res = await api.get<{ templates: DashboardTemplateSummaryDto[] }>(
+        `/workspaces/${workspaceId}/dashboards/templates`,
+      );
+      return res.data.templates;
+    },
+    enabled: !!workspaceId,
   });
 }
 
@@ -116,6 +153,78 @@ export function useAddDashboardWidget() {
       queryClient.invalidateQueries({ queryKey: ['dashboards', workspaceId] });
       queryClient.invalidateQueries({
         queryKey: ['dashboards', 'one', workspaceId, dashboardId],
+      });
+    },
+  });
+}
+
+export function useCreateDashboardFromTemplate() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (data: {
+      workspaceId: string;
+      templateId: string;
+      name?: string;
+    }) => {
+      const { workspaceId, ...body } = data;
+      const res = await api.post<Dashboard>(
+        `/workspaces/${workspaceId}/dashboards/from-template`,
+        body,
+      );
+      return res.data;
+    },
+    onSuccess: (d) => {
+      queryClient.invalidateQueries({ queryKey: ['dashboards', d.workspaceId] });
+      queryClient.invalidateQueries({
+        queryKey: ['dashboards', 'one', d.workspaceId, d.id],
+      });
+    },
+  });
+}
+
+export function useDuplicateDashboard() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (data: {
+      workspaceId: string;
+      dashboardId: string;
+      name?: string;
+    }) => {
+      const { workspaceId, dashboardId, ...body } = data;
+      const res = await api.post<Dashboard>(
+        `/workspaces/${workspaceId}/dashboards/${dashboardId}/duplicate`,
+        body,
+      );
+      return res.data;
+    },
+    onSuccess: (d) => {
+      queryClient.invalidateQueries({ queryKey: ['dashboards', d.workspaceId] });
+      queryClient.invalidateQueries({
+        queryKey: ['dashboards', 'one', d.workspaceId, d.id],
+      });
+    },
+  });
+}
+
+export function useApplyDashboardLayoutPreset() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (data: {
+      workspaceId: string;
+      dashboardId: string;
+      presetId: string;
+    }) => {
+      const { workspaceId, dashboardId, presetId } = data;
+      const res = await api.post<Dashboard>(
+        `/workspaces/${workspaceId}/dashboards/${dashboardId}/apply-layout-preset`,
+        { presetId },
+      );
+      return res.data;
+    },
+    onSuccess: (d) => {
+      queryClient.invalidateQueries({ queryKey: ['dashboards', d.workspaceId] });
+      queryClient.invalidateQueries({
+        queryKey: ['dashboards', 'one', d.workspaceId, d.id],
       });
     },
   });

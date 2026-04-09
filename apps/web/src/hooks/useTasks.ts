@@ -216,11 +216,16 @@ export function useAssignTask() {
     mutationFn: async ({
       taskId,
       userId,
+      unitsPercent,
     }: {
       taskId: string;
       userId: string;
+      unitsPercent?: number;
     }) => {
-      const res = await api.post<Task>(`/tasks/${taskId}/assignees`, { userId });
+      const res = await api.post<Task>(`/tasks/${taskId}/assignees`, {
+        userId,
+        ...(unitsPercent !== undefined ? { unitsPercent } : {}),
+      });
       return res.data;
     },
     onSuccess: (task) => {
@@ -228,6 +233,45 @@ export function useAssignTask() {
       if (task.projectId) {
         queryClient.invalidateQueries({ queryKey: ['tasks', task.projectId] });
         queryClient.invalidateQueries({ queryKey: ['projects', task.projectId] });
+        queryClient.invalidateQueries({ queryKey: ['projects', task.projectId, 'workload'] });
+      }
+      queryClient.invalidateQueries({ queryKey: ['tasks:me'] });
+    },
+  });
+}
+
+export function usePatchAssigneeUnits() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      taskId,
+      userId,
+      unitsPercent,
+      workMinutes,
+      costPerUse,
+    }: {
+      taskId: string;
+      userId: string;
+      unitsPercent?: number;
+      workMinutes?: number | null;
+      costPerUse?: number | null;
+    }) => {
+      const body: Record<string, unknown> = {};
+      if (unitsPercent !== undefined) body.unitsPercent = unitsPercent;
+      if (workMinutes !== undefined) body.workMinutes = workMinutes;
+      if (costPerUse !== undefined) body.costPerUse = costPerUse;
+      if (Object.keys(body).length === 0) {
+        throw new Error('Provide unitsPercent, workMinutes, and/or costPerUse');
+      }
+      const res = await api.patch<Task>(`/tasks/${taskId}/assignees/${userId}`, body);
+      return res.data;
+    },
+    onSuccess: (task) => {
+      queryClient.invalidateQueries({ queryKey: taskDetailQueryKey(task.id) });
+      if (task.projectId) {
+        queryClient.invalidateQueries({ queryKey: ['tasks', task.projectId] });
+        queryClient.invalidateQueries({ queryKey: ['projects', task.projectId] });
+        queryClient.invalidateQueries({ queryKey: ['projects', task.projectId, 'workload'] });
       }
       queryClient.invalidateQueries({ queryKey: ['tasks:me'] });
     },
@@ -282,11 +326,16 @@ export function useAddTaskDependency() {
     mutationFn: async ({
       taskId,
       blockingTaskId,
+      lagDays,
     }: {
       taskId: string;
       blockingTaskId: string;
+      lagDays?: number;
     }) => {
-      const res = await api.post<Task>(`/tasks/${taskId}/dependencies`, { blockingTaskId });
+      const res = await api.post<Task>(`/tasks/${taskId}/dependencies`, {
+        blockingTaskId,
+        ...(lagDays !== undefined ? { lagDays } : {}),
+      });
       return res.data;
     },
     onSuccess: (task) => {
@@ -310,6 +359,36 @@ export function useRemoveTaskDependency() {
       blockingTaskId: string;
     }) => {
       const res = await api.delete<Task>(`/tasks/${taskId}/dependencies/${blockingTaskId}`);
+      return res.data;
+    },
+    onSuccess: (task) => {
+      queryClient.setQueryData(taskDetailQueryKey(task.id), task);
+      if (task.projectId) {
+        queryClient.invalidateQueries({ queryKey: ['tasks', task.projectId] });
+        queryClient.invalidateQueries({ queryKey: ['projects', task.projectId] });
+      }
+    },
+  });
+}
+
+export function useUpdateTaskDependencyLag() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      taskId,
+      blockingTaskId,
+      ...patch
+    }: {
+      taskId: string;
+      blockingTaskId: string;
+      lagDays?: number;
+      linkType?: string;
+      lagIsElapsed?: boolean;
+    }) => {
+      const res = await api.patch<Task>(
+        `/tasks/${taskId}/dependencies/${blockingTaskId}`,
+        patch,
+      );
       return res.data;
     },
     onSuccess: (task) => {
@@ -412,6 +491,90 @@ export function useSetTaskCustomFieldValue() {
     },
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: taskDetailQueryKey(variables.taskId) });
+    },
+  });
+}
+
+export function useAddTaskGenericResourceAssignment() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      taskId,
+      genericResourceId,
+      unitsPercent,
+    }: {
+      taskId: string;
+      genericResourceId: string;
+      unitsPercent?: number;
+    }) => {
+      const res = await api.post<Task>(`/tasks/${taskId}/generic-resource-assignments`, {
+        genericResourceId,
+        ...(unitsPercent !== undefined ? { unitsPercent } : {}),
+      });
+      return res.data;
+    },
+    onSuccess: (task) => {
+      queryClient.invalidateQueries({ queryKey: taskDetailQueryKey(task.id) });
+      if (task.projectId) {
+        queryClient.invalidateQueries({ queryKey: ['tasks', task.projectId] });
+        queryClient.invalidateQueries({ queryKey: ['projects', task.projectId] });
+        queryClient.invalidateQueries({ queryKey: ['projects', task.projectId, 'workload'] });
+      }
+    },
+  });
+}
+
+export function usePatchTaskGenericResourceAssignment() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      taskId,
+      genericResourceId,
+      unitsPercent,
+    }: {
+      taskId: string;
+      genericResourceId: string;
+      unitsPercent: number;
+    }) => {
+      const res = await api.patch<Task>(
+        `/tasks/${taskId}/generic-resource-assignments/${genericResourceId}`,
+        { unitsPercent },
+      );
+      return res.data;
+    },
+    onSuccess: (task) => {
+      queryClient.invalidateQueries({ queryKey: taskDetailQueryKey(task.id) });
+      if (task.projectId) {
+        queryClient.invalidateQueries({ queryKey: ['tasks', task.projectId] });
+        queryClient.invalidateQueries({ queryKey: ['projects', task.projectId] });
+        queryClient.invalidateQueries({ queryKey: ['projects', task.projectId, 'workload'] });
+      }
+    },
+  });
+}
+
+export function useRemoveTaskGenericResourceAssignment() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      taskId,
+      genericResourceId,
+    }: {
+      taskId: string;
+      genericResourceId: string;
+    }) => {
+      const res = await api.delete<Task>(
+        `/tasks/${taskId}/generic-resource-assignments/${genericResourceId}`,
+      );
+      return res.data;
+    },
+    onSuccess: (task) => {
+      queryClient.invalidateQueries({ queryKey: taskDetailQueryKey(task.id) });
+      if (task.projectId) {
+        queryClient.invalidateQueries({ queryKey: ['tasks', task.projectId] });
+        queryClient.invalidateQueries({ queryKey: ['projects', task.projectId] });
+        queryClient.invalidateQueries({ queryKey: ['projects', task.projectId, 'workload'] });
+      }
     },
   });
 }

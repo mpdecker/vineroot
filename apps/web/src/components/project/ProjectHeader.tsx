@@ -67,14 +67,28 @@ export function ProjectHeader({
   const [editOpen, setEditOpen] = useState(false);
   const navigate = useNavigate();
   const { mutate: duplicateProject, isPending: duplicating } = useDuplicateProject();
-  const views = [
+  const views: { name: string; path: string; title?: string }[] = [
     { name: 'List', path: 'list' },
     { name: 'Board', path: 'board' },
     { name: 'Backlog', path: 'backlog' },
     { name: 'Sprint', path: 'sprint-board' },
     { name: 'Roadmap', path: 'roadmap' },
     { name: 'Epics', path: 'epics' },
-    { name: 'Timeline', path: 'timeline' },
+    {
+      name: 'Schedule',
+      path: 'timeline',
+      title: 'Gantt-style schedule (timeline)',
+    },
+    {
+      name: 'Network',
+      path: 'network',
+      title: 'Dependency network (PERT-style)',
+    },
+    {
+      name: 'Timephased',
+      path: 'timephased',
+      title: 'Work and cost by period',
+    },
     { name: 'Calendar', path: 'calendar' },
     { name: 'Burndown', path: 'burndown' },
     { name: 'Flow', path: 'flow' },
@@ -132,6 +146,7 @@ export function ProjectHeader({
             <NavLink
               key={view.path}
               to={`/projects/${project.id}/${view.path}`}
+              title={view.title}
               className={({ isActive }) =>
                 `px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
                   isActive

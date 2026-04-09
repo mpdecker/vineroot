@@ -1,10 +1,14 @@
 import { Test } from '@nestjs/testing';
 import { GoalService } from './goal.service';
 import { PrismaService } from '../common/prisma.service';
+import { GoalMetricComputeService } from './goal-metric-compute.service';
 import { GoalStatus } from '@prisma/client';
 
 describe('GoalService', () => {
   let service: GoalService;
+  const goalMetricCompute = {
+    computeAndPersist: jest.fn().mockResolvedValue(undefined),
+  };
   const prisma = {
     goal: {
       create: jest.fn(),
@@ -42,6 +46,7 @@ describe('GoalService', () => {
       providers: [
         GoalService,
         { provide: PrismaService, useValue: prisma },
+        { provide: GoalMetricComputeService, useValue: goalMetricCompute },
       ],
     }).compile();
     service = moduleRef.get(GoalService);

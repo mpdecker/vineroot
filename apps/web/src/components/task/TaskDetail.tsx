@@ -16,17 +16,24 @@ import {
   useUpdateTask,
   useAssignTask,
   useRemoveAssignee,
+  usePatchAssigneeUnits,
   useTask,
   useTasks,
   useCreateTask,
   useAddTaskDependency,
   useRemoveTaskDependency,
+  useUpdateTaskDependencyLag,
   useAddTaskAttachment,
   useDeleteTaskAttachment,
   useUploadTaskAttachment,
   useSetTaskCustomFieldValue,
   useDuplicateTask,
+  useAddTaskGenericResourceAssignment,
+  usePatchTaskGenericResourceAssignment,
+  useRemoveTaskGenericResourceAssignment,
 } from '../../hooks/useTasks';
+import { useGenericResources } from '../../hooks/useGenericResources';
+import { useWorkCalendars } from '../../hooks/useWorkCalendars';
 import { useCreateSprint, useProject } from '../../hooks/useProjects';
 import { listEpicTasks } from '../../lib/filterSectionsByEpic';
 import {
@@ -38,12 +45,16 @@ import { useWorkspaces } from '../../hooks/useWorkspaces';
 import { useTaskComments, useCreateComment } from '../../hooks/useComments';
 import { useTaskAuditLogs } from '../../hooks/useAuditLogs';
 import { useUIStore } from '../../stores/ui.store';
-import { formatDistanceToNow } from 'date-fns';
+import { format, formatDistanceToNow, parseISO } from 'date-fns';
+import type { TaskBaselineCompareRowDto } from '@vineroot/shared-types';
+import { api } from '../../lib/api';
 import {
   ActorTier,
   TaskDomain,
   TaskComplexity,
   ReviewGate,
+  SCHEDULE_BASELINE_INDEX_MAX,
+  TaskWorkContour,
 } from '@vineroot/shared-types';
 import { fieldValueToDisplay } from '../../lib/taskDetailFieldValue';
 import { openTaskAttachment } from '../../lib/openTaskAttachment';
@@ -58,12 +69,48 @@ const WORK_ITEM_OPTIONS: TaskWorkItemType[] = [
   'SPIKE',
 ];
 
+const WORK_CONTOUR_OPTIONS: TaskWorkContour[] = [
+  TaskWorkContour.FLAT,
+  TaskWorkContour.FRONT_LOADED,
+  TaskWorkContour.BACK_LOADED,
+  TaskWorkContour.BELL,
+  TaskWorkContour.DOUBLE_PEAK,
+  TaskWorkContour.TURTLE,
+  TaskWorkContour.EARLY_PEAK,
+  TaskWorkContour.LATE_PEAK,
+];
+
+function workContourLabel(c: TaskWorkContour): string {
+  switch (c) {
+    case TaskWorkContour.FLAT:
+      return 'Flat (even)';
+    case TaskWorkContour.FRONT_LOADED:
+      return 'Front-loaded';
+    case TaskWorkContour.BACK_LOADED:
+      return 'Back-loaded';
+    case TaskWorkContour.BELL:
+      return 'Bell (peak mid)';
+    case TaskWorkContour.DOUBLE_PEAK:
+      return 'Double peak';
+    case TaskWorkContour.TURTLE:
+      return 'Turtle (U-shape, low mid)';
+    case TaskWorkContour.EARLY_PEAK:
+      return 'Early peak';
+    case TaskWorkContour.LATE_PEAK:
+      return 'Late peak';
+    default:
+      return c;
+  }
+}
+
 interface TaskDetailProps {
   task: Task;
   isOpen: boolean;
   onClose: () => void;
   /** Project workspaces — used to offer workspace members as assignees */
   workspaceIds?: string[];
+  /** First workspace id for schedule/baseline APIs (project timeline context). */
+  scheduleWorkspaceId?: string;
   /** Sprints on the current project (for assignment). */
   sprints?: Sprint[];
 }
@@ -223,6 +270,7 @@ export function TaskDetail({
   isOpen,
   onClose,
   workspaceIds,
+  scheduleWorkspaceId,
   sprints = [],
 }: TaskDetailProps) {
   const openTask = useUIStore((s) => s.openTask);
@@ -259,13 +307,34 @@ export function TaskDetail({
   const [newSprintName, setNewSprintName] = useState('');
   const [newSprintStart, setNewSprintStart] = useState('');
   const [newSprintEnd, setNewSprintEnd] = useState('');
+  const [baselineSlot, setBaselineSlot] = useState(0);
+  const [baselineCompareRow, setBaselineCompareRow] = useState<
+    TaskBaselineCompareRowDto | null | undefined
+  >(undefined);
+  const [baselineCompareLoading, setBaselineCompareLoading] = useState(false);
+  const [scheduleSegmentsDraft, setScheduleSegmentsDraft] = useState('');
+  const [segmentsJsonError, setSegmentsJsonError] = useState<string | null>(null);
 
   const { mutate: updateTask, isPending } = useUpdateTask();
   const { mutate: assignUser, isPending: assigning } = useAssignTask();
   const { mutate: unassignUser, isPending: unassigning } = useRemoveAssignee();
+  const { mutate: patchAssigneeUnits, isPending: patchingUnits } = usePatchAssigneeUnits();
+  const { data: genericResources = [] } = useGenericResources(
+    isOpen && task.projectId && scheduleWorkspaceId ? scheduleWorkspaceId : undefined,
+  );
+  const { data: workCalendars = [] } = useWorkCalendars(
+    isOpen && scheduleWorkspaceId ? scheduleWorkspaceId : undefined,
+  );
+  const { mutate: addGenericRes, isPending: addingGenericRes } =
+    useAddTaskGenericResourceAssignment();
+  const { mutate: patchGenericRes, isPending: patchingGenericRes } =
+    usePatchTaskGenericResourceAssignment();
+  const { mutate: removeGenericRes, isPending: removingGenericRes } =
+    useRemoveTaskGenericResourceAssignment();
   const { mutate: createTask, isPending: creatingSubtask } = useCreateTask();
   const { mutate: addDependency, isPending: addingDep } = useAddTaskDependency();
   const { mutate: removeDependency, isPending: removingDep } = useRemoveTaskDependency();
+  const { mutate: updateDepLag, isPending: patchingDepLag } = useUpdateTaskDependencyLag();
   const { mutate: addAttachment, isPending: addingAttachment } = useAddTaskAttachment();
   const { mutate: deleteAttachment, isPending: deletingAttachment } = useDeleteTaskAttachment();
   const { mutate: uploadAttachment, isPending: uploadingAttachment } = useUploadTaskAttachment();
@@ -370,6 +439,44 @@ export function TaskDetail({
     }
   }, []);
   const { data: auditRows } = useTaskAuditLogs(isOpen ? task.id : undefined);
+
+  useEffect(() => {
+    if (!isOpen || !task.projectId || !scheduleWorkspaceId) {
+      setBaselineCompareRow(undefined);
+      setBaselineCompareLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setBaselineCompareRow(undefined);
+    setBaselineCompareLoading(true);
+    void api
+      .get<TaskBaselineCompareRowDto[]>(
+        `/workspaces/${scheduleWorkspaceId}/projects/${task.projectId}/schedule/baselines/compare`,
+        { params: { index: baselineSlot, taskId: task.id } },
+      )
+      .then((res) => {
+        if (!cancelled) {
+          setBaselineCompareRow(res.data?.[0] ?? null);
+          setBaselineCompareLoading(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setBaselineCompareRow(null);
+          setBaselineCompareLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, task.id, task.projectId, scheduleWorkspaceId, baselineSlot]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const s = task.scheduleSegments;
+    setScheduleSegmentsDraft(s?.length ? JSON.stringify(s, null, 2) : '');
+    setSegmentsJsonError(null);
+  }, [isOpen, task.id, task.scheduleSegments]);
 
   const storyTimeline = useMemo(() => {
     type Row =
@@ -600,28 +707,133 @@ export function TaskDetail({
                   <label className="text-xs font-medium text-gray-500 uppercase tracking-wide block mb-1.5">
                     Assignees
                   </label>
+                  <p className="text-xs text-gray-500 mb-2">
+                    Units % drives workload and leveling (default 100). Optional work (minutes) per
+                    assignee overrides task-level work for cost / EVM when set.
+                  </p>
                   <div className="space-y-2">
                     {(task.assignees ?? []).map((assignee) => (
                       <div
                         key={assignee.id}
                         className="flex items-center justify-between gap-2 p-2 bg-white rounded-lg border border-gray-100"
                       >
-                        <div className="flex items-center gap-3 min-w-0">
+                        <div className="flex items-center gap-3 min-w-0 flex-1">
                           <Avatar name={assignee.user.displayName} size="sm" />
                           <span className="text-sm text-gray-900 truncate">
                             {assignee.user.displayName}
                           </span>
                         </div>
-                        <button
-                          type="button"
-                          disabled={unassigning}
-                          onClick={() =>
-                            unassignUser({ taskId: task.id, userId: assignee.userId })
-                          }
-                          className="text-xs text-gray-500 hover:text-red-600 px-2 py-1 rounded hover:bg-red-50 disabled:opacity-50"
-                        >
-                          Remove
-                        </button>
+                        <div className="flex flex-col sm:flex-row sm:items-center gap-2 shrink-0">
+                          <label className="text-[11px] text-gray-500 flex items-center gap-1 whitespace-nowrap">
+                            Units
+                            <input
+                              type="number"
+                              min={1}
+                              max={100}
+                              step={1}
+                              className="w-12 border border-gray-200 rounded px-1 py-0.5 text-xs text-gray-900"
+                              defaultValue={assignee.unitsPercent ?? 100}
+                              key={`u-${assignee.userId}-${assignee.unitsPercent ?? 100}-${assignee.workMinutes ?? ''}`}
+                              disabled={patchingUnits}
+                              onBlur={(e) => {
+                                const v = Math.round(Number(e.target.value));
+                                if (!Number.isFinite(v) || v < 1 || v > 100) return;
+                                if (v === (assignee.unitsPercent ?? 100)) return;
+                                patchAssigneeUnits({
+                                  taskId: task.id,
+                                  userId: assignee.userId,
+                                  unitsPercent: v,
+                                });
+                              }}
+                            />
+                            <span className="text-gray-400">%</span>
+                          </label>
+                          <label className="text-[11px] text-gray-500 flex items-center gap-1 whitespace-nowrap">
+                            Work
+                            <input
+                              type="number"
+                              min={0}
+                              step={15}
+                              placeholder="—"
+                              className="w-14 border border-gray-200 rounded px-1 py-0.5 text-xs text-gray-900"
+                              defaultValue={
+                                assignee.workMinutes != null ? assignee.workMinutes : ''
+                              }
+                              key={`w-${assignee.userId}-${assignee.workMinutes ?? 'none'}-${assignee.unitsPercent ?? 100}`}
+                              disabled={patchingUnits}
+                              title="Assignment work (minutes); leave empty to use task work × units for cost"
+                              onBlur={(e) => {
+                                const raw = e.target.value.trim();
+                                const prev = assignee.workMinutes ?? null;
+                                if (raw === '') {
+                                  if (prev == null) return;
+                                  patchAssigneeUnits({
+                                    taskId: task.id,
+                                    userId: assignee.userId,
+                                    workMinutes: null,
+                                  });
+                                  return;
+                                }
+                                const v = Math.round(Number(raw));
+                                if (!Number.isFinite(v) || v < 0) return;
+                                if (prev !== null && v === prev) return;
+                                patchAssigneeUnits({
+                                  taskId: task.id,
+                                  userId: assignee.userId,
+                                  workMinutes: v,
+                                });
+                              }}
+                            />
+                            <span className="text-gray-400">min</span>
+                          </label>
+                          <label className="text-[11px] text-gray-500 flex items-center gap-1 whitespace-nowrap">
+                            Per-use
+                            <input
+                              type="number"
+                              min={0}
+                              step={0.01}
+                              placeholder="—"
+                              className="w-16 border border-gray-200 rounded px-1 py-0.5 text-xs text-gray-900"
+                              defaultValue={
+                                assignee.costPerUse != null ? assignee.costPerUse : ''
+                              }
+                              key={`c-${assignee.userId}-${assignee.costPerUse ?? 'none'}`}
+                              disabled={patchingUnits}
+                              title="One-time fee for this assignment (e.g. per-use cost)"
+                              onBlur={(e) => {
+                                const raw = e.target.value.trim();
+                                const prev = assignee.costPerUse ?? null;
+                                if (raw === '') {
+                                  if (prev == null) return;
+                                  patchAssigneeUnits({
+                                    taskId: task.id,
+                                    userId: assignee.userId,
+                                    costPerUse: null,
+                                  });
+                                  return;
+                                }
+                                const v = Number.parseFloat(raw.replace(',', '.'));
+                                if (!Number.isFinite(v) || v < 0) return;
+                                if (prev !== null && Math.abs(v - prev) < 1e-9) return;
+                                patchAssigneeUnits({
+                                  taskId: task.id,
+                                  userId: assignee.userId,
+                                  costPerUse: v,
+                                });
+                              }}
+                            />
+                          </label>
+                          <button
+                            type="button"
+                            disabled={unassigning}
+                            onClick={() =>
+                              unassignUser({ taskId: task.id, userId: assignee.userId })
+                            }
+                            className="text-xs text-gray-500 hover:text-red-600 px-2 py-1 rounded hover:bg-red-50 disabled:opacity-50"
+                          >
+                            Remove
+                          </button>
+                        </div>
                       </div>
                     ))}
                     {assignableUsers.length > 0 && (
@@ -655,6 +867,115 @@ export function TaskDetail({
                       )}
                   </div>
                 </div>
+
+                {task.projectId && scheduleWorkspaceId && (
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 uppercase tracking-wide block mb-1.5">
+                      Generic resources
+                    </label>
+                    <p className="text-xs text-gray-500 mb-2">
+                      Named capacity (equipment, role buckets) for overallocation on max units.
+                      Manage the list under Workspace settings → Resources.
+                    </p>
+                    <div className="space-y-2">
+                      {(task.genericResourceAssignments ?? []).map((a) => (
+                        <div
+                          key={a.id}
+                          className="flex items-center justify-between gap-2 p-2 bg-white rounded-lg border border-gray-100"
+                        >
+                          <span className="text-sm text-gray-900 truncate">
+                            {a.genericResource.name}
+                            <span className="text-xs text-gray-500 ml-1">
+                              (max {a.genericResource.maxUnitsPercent}%)
+                            </span>
+                          </span>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <label className="text-[11px] text-gray-500 flex items-center gap-1">
+                              Units
+                              <input
+                                type="number"
+                                min={1}
+                                max={10000}
+                                step={1}
+                                className="w-14 border border-gray-200 rounded px-1 py-0.5 text-xs text-gray-900"
+                                defaultValue={a.unitsPercent}
+                                key={`${a.genericResourceId}-${a.unitsPercent}`}
+                                disabled={patchingGenericRes}
+                                onBlur={(e) => {
+                                  const v = Math.round(Number(e.target.value));
+                                  if (!Number.isFinite(v) || v < 1) return;
+                                  if (v === a.unitsPercent) return;
+                                  patchGenericRes({
+                                    taskId: task.id,
+                                    genericResourceId: a.genericResourceId,
+                                    unitsPercent: v,
+                                  });
+                                }}
+                              />
+                              <span className="text-gray-400">%</span>
+                            </label>
+                            <button
+                              type="button"
+                              disabled={removingGenericRes}
+                              onClick={() =>
+                                removeGenericRes({
+                                  taskId: task.id,
+                                  genericResourceId: a.genericResourceId,
+                                })
+                              }
+                              className="text-xs text-gray-500 hover:text-red-600 px-2 py-1 rounded hover:bg-red-50 disabled:opacity-50"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                      {genericResources.filter(
+                        (gr) =>
+                          !(task.genericResourceAssignments ?? []).some(
+                            (x) => x.genericResourceId === gr.id,
+                          ),
+                      ).length > 0 && (
+                        <select
+                          className="w-full text-sm border border-dashed border-gray-300 rounded-lg px-2 py-2 bg-white text-gray-600"
+                          disabled={addingGenericRes}
+                          defaultValue=""
+                          onChange={(e) => {
+                            const gid = e.target.value;
+                            if (!gid) return;
+                            addGenericRes({
+                              taskId: task.id,
+                              genericResourceId: gid,
+                              unitsPercent: 100,
+                            });
+                            e.target.value = '';
+                          }}
+                        >
+                          <option value="">
+                            {addingGenericRes ? 'Adding…' : '+ Add generic resource'}
+                          </option>
+                          {genericResources
+                            .filter(
+                              (gr) =>
+                                !(task.genericResourceAssignments ?? []).some(
+                                  (x) => x.genericResourceId === gr.id,
+                                ),
+                            )
+                            .map((gr) => (
+                              <option key={gr.id} value={gr.id}>
+                                {gr.name}
+                              </option>
+                            ))}
+                        </select>
+                      )}
+                      {genericResources.length === 0 && (
+                        <p className="text-xs text-gray-500">
+                          No generic resources in this workspace yet.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
 
               {task.projectId && (
@@ -822,6 +1143,380 @@ export function TaskDetail({
                     />
                     Milestone (timeline diamond)
                   </label>
+                  {scheduleWorkspaceId ? (
+                    <div className="pt-2 border-t border-gray-100 space-y-2">
+                      <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">
+                        Task calendar &amp; schedule mode
+                      </p>
+                      {task.wbsOutlineNumber ? (
+                        <p className="text-xs text-gray-600">
+                          WBS{' '}
+                          <span className="font-mono bg-gray-50 px-1 rounded border border-gray-100">
+                            {task.wbsOutlineNumber}
+                          </span>
+                        </p>
+                      ) : null}
+                      <div>
+                        <label
+                          htmlFor="task-detail-work-cal"
+                          className="text-xs font-medium text-gray-500 uppercase tracking-wide block mb-1.5"
+                        >
+                          Work calendar
+                        </label>
+                        <select
+                          id="task-detail-work-cal"
+                          className="w-full text-sm border border-gray-200 rounded-lg px-2 py-2 bg-white"
+                          value={task.workCalendarId ?? ''}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            updateTask({
+                              taskId: task.id,
+                              workCalendarId: v === '' ? null : v,
+                            });
+                          }}
+                        >
+                          <option value="">Project / assignee default</option>
+                          {workCalendars.map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label
+                          htmlFor="task-detail-schedule-mode"
+                          className="text-xs font-medium text-gray-500 uppercase tracking-wide block mb-1.5"
+                        >
+                          Schedule mode
+                        </label>
+                        <select
+                          id="task-detail-schedule-mode"
+                          className="w-full text-sm border border-gray-200 rounded-lg px-2 py-2 bg-white"
+                          value={task.scheduleMode ?? 'MANUAL'}
+                          onChange={(e) =>
+                            updateTask({ taskId: task.id, scheduleMode: e.target.value })
+                          }
+                        >
+                          <option value="MANUAL">Manual</option>
+                          <option value="FIXED_DURATION">Fixed duration</option>
+                          <option value="FIXED_WORK">Fixed work</option>
+                          <option value="FIXED_UNITS">Fixed units</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label
+                          htmlFor="task-detail-leveling-priority"
+                          className="text-xs font-medium text-gray-500 uppercase tracking-wide block mb-1.5"
+                        >
+                          Leveling priority (0–1000)
+                        </label>
+                        <input
+                          id="task-detail-leveling-priority"
+                          type="number"
+                          min={0}
+                          max={1000}
+                          step={1}
+                          className="w-full text-sm border border-gray-200 rounded-lg px-2 py-2 bg-white"
+                          value={task.levelingPriority ?? 500}
+                          onChange={(e) => {
+                            const n = parseInt(e.target.value, 10);
+                            if (!Number.isFinite(n)) return;
+                            updateTask({
+                              taskId: task.id,
+                              levelingPriority: Math.min(1000, Math.max(0, n)),
+                            });
+                          }}
+                        />
+                        <p className="text-xs text-gray-500 mt-1">
+                          Lower values are delayed first when leveling workload (MSP-style; default
+                          500).
+                        </p>
+                      </div>
+                      <div>
+                        <label
+                          htmlFor="task-detail-leveling-delay"
+                          className="text-xs font-medium text-gray-500 uppercase tracking-wide block mb-1.5"
+                        >
+                          Leveling delay (working days)
+                        </label>
+                        <input
+                          id="task-detail-leveling-delay"
+                          type="number"
+                          min={0}
+                          readOnly
+                          className="w-full text-sm border border-gray-200 rounded-lg px-2 py-2 bg-gray-50 text-gray-700"
+                          value={task.levelingDelayWorkingDays ?? 0}
+                        />
+                        <p className="text-xs text-gray-500 mt-1">
+                          Increments when leveling shifts this task; clear with “Clear leveling
+                          delays” on the project Workload view.
+                        </p>
+                      </div>
+                      <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          className="rounded border-gray-300 text-brand-600 focus:ring-brand-500"
+                          checked={task.levelingCanSplit ?? false}
+                          onChange={(e) =>
+                            updateTask({
+                              taskId: task.id,
+                              levelingCanSplit: e.target.checked,
+                            })
+                          }
+                        />
+                        Leveling can split (defer this task last when option is on)
+                      </label>
+                      <div>
+                        <label
+                          htmlFor="task-detail-deadline"
+                          className="text-xs font-medium text-gray-500 uppercase tracking-wide block mb-1.5"
+                        >
+                          Deadline
+                        </label>
+                        <input
+                          id="task-detail-deadline"
+                          type="date"
+                          className="w-full text-sm border border-gray-200 rounded-lg px-2 py-2 bg-white"
+                          value={toDateInputValue(task.deadlineDate)}
+                          onChange={(e) =>
+                            updateTask({
+                              taskId: task.id,
+                              deadlineDate: fromDateInputValue(e.target.value),
+                            })
+                          }
+                        />
+                      </div>
+                      <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          className="rounded border-gray-300 text-brand-600 focus:ring-brand-500"
+                          checked={task.effortDriven ?? false}
+                          onChange={(e) =>
+                            updateTask({
+                              taskId: task.id,
+                              effortDriven: e.target.checked,
+                            })
+                          }
+                        />
+                        Effort driven (split work across assignees)
+                      </label>
+                      <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          className="rounded border-gray-300 text-brand-600 focus:ring-brand-500"
+                          checked={task.isSummaryRollup ?? false}
+                          onChange={(e) =>
+                            updateTask({
+                              taskId: task.id,
+                              isSummaryRollup: e.target.checked,
+                            })
+                          }
+                        />
+                        Summary rollup (dates from subtasks on recalculate)
+                      </label>
+                    </div>
+                  ) : null}
+                  {scheduleWorkspaceId ? (
+                    <div className="pt-2 border-t border-gray-100 space-y-2">
+                      <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">
+                        Timephased work contour
+                      </p>
+                      <p className="text-[11px] text-gray-500">
+                        Controls how work (and proportional cost) is spread across periods in the
+                        project <span className="text-gray-700">Timephased</span> view (use
+                        Calendar vs Working basis on that page). Ignored when split segments below
+                        are set. Does not change CPM dates.
+                      </p>
+                      <select
+                        className="w-full text-sm border border-gray-200 rounded-lg px-2 py-2 bg-white text-gray-800"
+                        disabled={isPending}
+                        value={task.workContour ?? TaskWorkContour.FLAT}
+                        onChange={(e) =>
+                          updateTask({
+                            taskId: task.id,
+                            workContour: e.target.value as TaskWorkContour,
+                          })
+                        }
+                      >
+                        {WORK_CONTOUR_OPTIONS.map((c) => (
+                          <option key={c} value={c}>
+                            {workContourLabel(c)}
+                          </option>
+                        ))}
+                      </select>
+                      <p className="text-xs font-medium text-gray-500 uppercase tracking-wide pt-1">
+                        Split schedule (Gantt segments)
+                      </p>
+                      <p className="text-[11px] text-gray-500">
+                        JSON array of objects with ISO{' '}
+                        <span className="text-gray-700 font-mono">start</span> and{' '}
+                        <span className="text-gray-700 font-mono">end</span>, optional{' '}
+                        <span className="text-gray-700 font-mono">workMinutes</span>. The timeline
+                        draws multiple bars; the schedule engine still uses the main start/due dates.
+                        Timephased uses these segments when present.
+                      </p>
+                      <textarea
+                        className="w-full text-xs font-mono border border-gray-200 rounded-lg px-2 py-2 bg-white text-gray-800 min-h-[88px]"
+                        placeholder='[ { "start": "2026-01-01T00:00:00.000Z", "end": "2026-01-05T00:00:00.000Z" } ]'
+                        value={scheduleSegmentsDraft}
+                        onChange={(e) => {
+                          setScheduleSegmentsDraft(e.target.value);
+                          setSegmentsJsonError(null);
+                        }}
+                      />
+                      {segmentsJsonError ? (
+                        <p className="text-xs text-red-600">{segmentsJsonError}</p>
+                      ) : null}
+                      <div className="flex gap-2 flex-wrap">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="secondary"
+                          disabled={isPending}
+                          onClick={() => {
+                            const t = scheduleSegmentsDraft.trim();
+                            if (t === '') {
+                              updateTask({ taskId: task.id, scheduleSegments: null });
+                              setSegmentsJsonError(null);
+                              return;
+                            }
+                            try {
+                              const parsed = JSON.parse(t) as unknown;
+                              if (!Array.isArray(parsed)) {
+                                setSegmentsJsonError('Expected a JSON array');
+                                return;
+                              }
+                              for (const row of parsed) {
+                                if (
+                                  !row ||
+                                  typeof row !== 'object' ||
+                                  typeof (row as { start?: unknown }).start !== 'string' ||
+                                  typeof (row as { end?: unknown }).end !== 'string'
+                                ) {
+                                  setSegmentsJsonError('Each item needs string start and end');
+                                  return;
+                                }
+                              }
+                              updateTask({
+                                taskId: task.id,
+                                scheduleSegments: parsed as {
+                                  start: string;
+                                  end: string;
+                                  workMinutes?: number;
+                                }[],
+                              });
+                              setSegmentsJsonError(null);
+                            } catch {
+                              setSegmentsJsonError('Invalid JSON');
+                            }
+                          }}
+                        >
+                          Apply segments
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="secondary"
+                          disabled={isPending}
+                          onClick={() => {
+                            setScheduleSegmentsDraft('');
+                            updateTask({ taskId: task.id, scheduleSegments: null });
+                            setSegmentsJsonError(null);
+                          }}
+                        >
+                          Clear
+                        </Button>
+                      </div>
+                    </div>
+                  ) : null}
+                  <div className="space-y-2 pt-2 border-t border-gray-100">
+                    <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">
+                      Cost and earned value
+                    </p>
+                    <div>
+                      <label
+                        htmlFor="task-detail-pct"
+                        className="text-xs font-medium text-gray-500 uppercase tracking-wide block mb-1.5"
+                      >
+                        % Complete
+                      </label>
+                      <input
+                        id="task-detail-pct"
+                        type="number"
+                        min={0}
+                        max={100}
+                        step={1}
+                        className="w-full text-sm border border-gray-200 rounded-lg px-2 py-2 bg-white"
+                        value={task.percentComplete ?? 0}
+                        onChange={(e) => {
+                          const n = Math.round(Number(e.target.value));
+                          if (!Number.isFinite(n)) return;
+                          updateTask({
+                            taskId: task.id,
+                            percentComplete: Math.min(100, Math.max(0, n)),
+                          });
+                        }}
+                      />
+                    </div>
+                    <div>
+                      <label
+                        htmlFor="task-detail-fixed-cost"
+                        className="text-xs font-medium text-gray-500 uppercase tracking-wide block mb-1.5"
+                      >
+                        Fixed cost
+                      </label>
+                      <input
+                        id="task-detail-fixed-cost"
+                        type="number"
+                        min={0}
+                        step={0.01}
+                        placeholder="—"
+                        className="w-full text-sm border border-gray-200 rounded-lg px-2 py-2 bg-white"
+                        value={task.fixedCost ?? ''}
+                        onChange={(e) => {
+                          const raw = e.target.value.trim();
+                          if (raw === '') {
+                            updateTask({ taskId: task.id, fixedCost: null });
+                            return;
+                          }
+                          const v = Number.parseFloat(raw.replace(',', '.'));
+                          if (!Number.isFinite(v) || v < 0) return;
+                          updateTask({ taskId: task.id, fixedCost: v });
+                        }}
+                      />
+                    </div>
+                    <div>
+                      <label
+                        htmlFor="task-detail-actual-cost"
+                        className="text-xs font-medium text-gray-500 uppercase tracking-wide block mb-1.5"
+                      >
+                        Actual cost (optional)
+                      </label>
+                      <input
+                        id="task-detail-actual-cost"
+                        type="number"
+                        min={0}
+                        step={0.01}
+                        placeholder="Leave empty → AC follows EV"
+                        className="w-full text-sm border border-gray-200 rounded-lg px-2 py-2 bg-white"
+                        value={task.actualCost ?? ''}
+                        onChange={(e) => {
+                          const raw = e.target.value.trim();
+                          if (raw === '') {
+                            updateTask({ taskId: task.id, actualCost: null });
+                            return;
+                          }
+                          const v = Number.parseFloat(raw.replace(',', '.'));
+                          if (!Number.isFinite(v) || v < 0) return;
+                          updateTask({ taskId: task.id, actualCost: v });
+                        }}
+                      />
+                      <p className="text-[11px] text-gray-500 mt-1">
+                        When set, project EVM uses this for AC instead of defaulting AC to EV.
+                      </p>
+                    </div>
+                  </div>
                   <div className="pt-1 border-t border-gray-100 space-y-2">
                     <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">
                       New sprint
@@ -881,6 +1576,112 @@ export function TaskDetail({
                       {creatingSprint ? 'Creating…' : 'Create & assign'}
                     </Button>
                   </div>
+                  {scheduleWorkspaceId ? (
+                    <div className="pt-3 border-t border-gray-100 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">
+                          Baseline variance
+                        </p>
+                        <select
+                          className="text-xs border border-gray-200 rounded-md px-2 py-1 bg-white text-gray-800 max-h-40"
+                          value={baselineSlot}
+                          aria-label="Baseline slot"
+                          onChange={(e) => {
+                            const n = Number(e.target.value);
+                            if (
+                              Number.isInteger(n) &&
+                              n >= 0 &&
+                              n <= SCHEDULE_BASELINE_INDEX_MAX
+                            ) {
+                              setBaselineSlot(n);
+                            }
+                          }}
+                        >
+                          {Array.from(
+                            { length: SCHEDULE_BASELINE_INDEX_MAX + 1 },
+                            (_, i) => (
+                              <option key={i} value={i}>
+                                BL{i}
+                              </option>
+                            ),
+                          )}
+                        </select>
+                      </div>
+                      {baselineCompareLoading || baselineCompareRow === undefined ? (
+                        <p className="text-xs text-gray-500">Loading baseline…</p>
+                      ) : baselineCompareRow === null ? (
+                        <p className="text-xs text-gray-500">
+                          No baseline data for this task in this slot. Save a baseline from the
+                          project timeline.
+                        </p>
+                      ) : !baselineCompareRow.baselineFinish ? (
+                        <p className="text-xs text-gray-600">
+                          No finish date in this baseline snapshot.
+                        </p>
+                      ) : (
+                        <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs text-gray-700">
+                          <dt className="text-gray-500">Baseline finish</dt>
+                          <dd>
+                            {format(
+                              parseISO(baselineCompareRow.baselineFinish),
+                              'MMM d, yyyy',
+                            )}
+                          </dd>
+                          <dt className="text-gray-500">Current finish</dt>
+                          <dd>
+                            {baselineCompareRow.currentFinish
+                              ? format(
+                                  parseISO(baselineCompareRow.currentFinish),
+                                  'MMM d, yyyy',
+                                )
+                              : '—'}
+                          </dd>
+                          <dt className="text-gray-500">Δ Finish (calendar d)</dt>
+                          <dd>
+                            {baselineCompareRow.finishVarianceDays == null
+                              ? '—'
+                              : `${baselineCompareRow.finishVarianceDays > 0 ? '+' : ''}${baselineCompareRow.finishVarianceDays}`}
+                          </dd>
+                          <dt className="text-gray-500">Δ Finish (working d)</dt>
+                          <dd>
+                            {baselineCompareRow.finishVarianceWorkingDays == null
+                              ? '—'
+                              : `${baselineCompareRow.finishVarianceWorkingDays > 0 ? '+' : ''}${baselineCompareRow.finishVarianceWorkingDays}`}
+                          </dd>
+                          <dt className="text-gray-500">Δ Start (calendar d)</dt>
+                          <dd>
+                            {baselineCompareRow.startVarianceDays == null
+                              ? '—'
+                              : `${baselineCompareRow.startVarianceDays > 0 ? '+' : ''}${baselineCompareRow.startVarianceDays}`}
+                          </dd>
+                          <dt className="text-gray-500">Δ Start (working d)</dt>
+                          <dd>
+                            {baselineCompareRow.startVarianceWorkingDays == null
+                              ? '—'
+                              : `${baselineCompareRow.startVarianceWorkingDays > 0 ? '+' : ''}${baselineCompareRow.startVarianceWorkingDays}`}
+                          </dd>
+                          <dt className="text-gray-500">Δ Work (min)</dt>
+                          <dd>
+                            {baselineCompareRow.workVarianceMinutes == null
+                              ? '—'
+                              : `${baselineCompareRow.workVarianceMinutes > 0 ? '+' : ''}${baselineCompareRow.workVarianceMinutes}`}
+                          </dd>
+                          <dt className="text-gray-500">Δ Cost</dt>
+                          <dd>
+                            {baselineCompareRow.costVariance == null
+                              ? '—'
+                              : `${baselineCompareRow.costVariance > 0 ? '+' : ''}${Math.round(baselineCompareRow.costVariance)}`}
+                          </dd>
+                          <dt className="text-gray-500">Baseline saved</dt>
+                          <dd>
+                            {baselineCompareRow.savedAt
+                              ? format(parseISO(baselineCompareRow.savedAt), 'MMM d, yyyy HH:mm')
+                              : '—'}
+                          </dd>
+                        </dl>
+                      )}
+                    </div>
+                  ) : null}
                 </div>
               )}
 
@@ -1034,7 +1835,9 @@ export function TaskDetail({
                 <div className="rounded-xl border border-gray-200 bg-white p-4 space-y-3">
                   <h3 className="text-sm font-medium text-gray-800">Dependencies</h3>
                   <p className="text-xs text-gray-500">
-                    This task is waiting on the following tasks to finish first.
+                    This task is waiting on the following tasks to finish first. Lag is whole days
+                    after the predecessor ends (negative = lead / overlap). Enable Elapsed for
+                    calendar-day lag (MSP-style).
                   </p>
                   <ul className="space-y-2">
                     {(task.waitingOn ?? []).map((dep) => (
@@ -1045,10 +1848,48 @@ export function TaskDetail({
                         <button
                           type="button"
                           onClick={() => dep.blockingTask && openTask(dep.blockingTask.id)}
-                          className="text-left text-gray-900 hover:text-brand-600 font-medium truncate"
+                          className="text-left text-gray-900 hover:text-brand-600 font-medium truncate min-w-0 flex-1"
                         >
                           {dep.blockingTask?.title ?? dep.blockingId}
                         </button>
+                        <label className="flex items-center gap-1 shrink-0 text-xs text-gray-600">
+                          <span className="sr-only">Lag days</span>
+                          <input
+                            type="number"
+                            title="Lag (+) or lead (−) in days"
+                            className="w-14 border border-gray-200 rounded px-1 py-0.5 text-right text-gray-800 bg-white"
+                            disabled={patchingDepLag}
+                            defaultValue={dep.lagDays ?? 0}
+                            key={`${dep.id}-${dep.lagDays ?? 0}-${dep.lagIsElapsed ? 'e' : 'w'}`}
+                            onBlur={(e) => {
+                              const n = parseInt(e.target.value, 10);
+                              if (!Number.isFinite(n) || n === (dep.lagDays ?? 0)) return;
+                              updateDepLag({
+                                taskId: task.id,
+                                blockingTaskId: dep.blockingId,
+                                lagDays: n,
+                              });
+                            }}
+                          />
+                          <span className="text-gray-400 hidden sm:inline">d</span>
+                        </label>
+                        <label className="flex items-center gap-1 shrink-0 text-[11px] text-gray-600 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            className="rounded border-gray-300 text-brand-600"
+                            title="Elapsed (calendar-day) lag"
+                            checked={dep.lagIsElapsed === true}
+                            disabled={patchingDepLag}
+                            onChange={(e) => {
+                              updateDepLag({
+                                taskId: task.id,
+                                blockingTaskId: dep.blockingId,
+                                lagIsElapsed: e.target.checked,
+                              });
+                            }}
+                          />
+                          Elapsed
+                        </label>
                         <button
                           type="button"
                           disabled={removingDep}
@@ -1127,13 +1968,24 @@ export function TaskDetail({
                       const display = fieldValueToDisplay(existing?.value);
                       const wsForApi = def.workspaceId || primaryWorkspaceId;
                       if (!wsForApi) return null;
+                      const isComputedField =
+                        def.isComputed === true ||
+                        (def.computedKind != null && def.computedKind !== 'NONE');
                       return (
                         <div key={def.id}>
                           <label className="text-xs font-medium text-gray-500 uppercase tracking-wide block mb-1">
                             {def.name}
                             {def.isRequired && <span className="text-red-500 ml-0.5">*</span>}
                           </label>
-                          {def.type === 'TEXT' || def.type === 'URL' || def.type === 'PERSON' ? (
+                          {def.description ? (
+                            <p className="text-xs text-gray-500 mb-1">{def.description}</p>
+                          ) : null}
+                          {isComputedField ? (
+                            <div className="w-full text-sm border border-dashed border-gray-200 rounded-lg px-2 py-1.5 bg-gray-50 text-gray-800">
+                              <span>{display || '—'}</span>
+                              <span className="text-xs text-gray-400 ml-2">(rollup)</span>
+                            </div>
+                          ) : def.type === 'TEXT' || def.type === 'URL' || def.type === 'PERSON' ? (
                             <input
                               type={def.type === 'URL' ? 'url' : 'text'}
                               defaultValue={display}

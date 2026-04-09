@@ -50,7 +50,7 @@ describe('useNotifications hooks', () => {
     const { result } = renderHook(() => useNotifications(), { wrapper: wrapper(client) });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data).toEqual([note]);
+    expect(result.current.data).toEqual({ notifications: [note], unreadCount: 1 });
   });
 
   it('useMarkNotificationRead posts read endpoint', async () => {

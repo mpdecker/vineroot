@@ -14,6 +14,7 @@ import {
   taskDetailQueryKey,
   useAddTaskDependency,
   useRemoveTaskDependency,
+  useUpdateTaskDependencyLag,
   useAddTaskAttachment,
   useDeleteTaskAttachment,
   useSetTaskCustomFieldValue,
@@ -334,6 +335,23 @@ describe('useTasks hooks (API wiring)', () => {
     await result.current.mutateAsync({ taskId: 't1', blockingTaskId: 't2' });
 
     expect(mockedApi.delete).toHaveBeenCalledWith('/tasks/t1/dependencies/t2');
+    expect(client.getQueryData(taskDetailQueryKey('t1'))).toEqual(next);
+  });
+
+  it('useUpdateTaskDependencyLag patches lag and seeds task-detail cache', async () => {
+    const next = {
+      ...sampleTask,
+      id: 't1',
+      waitingOn: [{ id: 'd1', blockingId: 't2', lagDays: 3 }],
+    };
+    mockedApi.patch.mockResolvedValue({ data: next });
+    const client = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+
+    const { result } = renderHook(() => useUpdateTaskDependencyLag(), { wrapper: wrapper(client) });
+
+    await result.current.mutateAsync({ taskId: 't1', blockingTaskId: 't2', lagDays: 3 });
+
+    expect(mockedApi.patch).toHaveBeenCalledWith('/tasks/t1/dependencies/t2', { lagDays: 3 });
     expect(client.getQueryData(taskDetailQueryKey('t1'))).toEqual(next);
   });
 

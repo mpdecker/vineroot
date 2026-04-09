@@ -219,7 +219,34 @@ describe('ProjectResourceController (HTTP integration)', () => {
       .expect(200);
 
     expect(res.body).toEqual(payload);
-    expect(projectService.getSprintBurndown).toHaveBeenCalledWith('p1', 'sp1', 'u1');
+    expect(projectService.getSprintBurndown).toHaveBeenCalledWith(
+      'p1',
+      'sp1',
+      'u1',
+      undefined,
+      undefined,
+    );
+  });
+
+  it('GET /api/v1/projects/:id/sprints/:sprintId/burndown passes from and to query params', async () => {
+    projectService.getSprintBurndown.mockResolvedValue({
+      sprintId: 'sp1',
+      projectId: 'p1',
+      totalScope: 1,
+      days: [],
+    });
+
+    await request(app.getHttpServer())
+      .get('/api/v1/projects/p1/sprints/sp1/burndown?from=2024-06-11&to=2024-06-12')
+      .expect(200);
+
+    expect(projectService.getSprintBurndown).toHaveBeenCalledWith(
+      'p1',
+      'sp1',
+      'u1',
+      '2024-06-11',
+      '2024-06-12',
+    );
   });
 
   it('GET /api/v1/projects/:id/sprints/:sprintId/burndown returns 404 when sprint missing', async () => {

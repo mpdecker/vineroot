@@ -1,17 +1,27 @@
 import {
+  Prisma,
   PrismaClient,
   ProjectColor,
   TaskPriority,
   TaskStatus,
   AuditEventType,
   CustomFieldType,
+  CustomFieldComputedKind,
+  CustomFieldRollupAggregation,
   TaskWorkItemType,
   SprintState,
   KanbanWipEnforcement,
   DependencyType,
+  ScheduleLinkType,
+  TaskConstraintType,
+  TaskScheduleMode,
   AutomationTriggerType,
   AutomationActionType,
   AgentTokenScope,
+  ActorTier,
+  TaskDomain,
+  TaskComplexity,
+  ReviewGate,
 } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { randomBytes } from 'crypto';
@@ -39,8 +49,17 @@ const PARITY_BLUEPRINT_MARKER = 'Dev: Project blueprint';
 /** Sprints, epics, burndown/CFD, saved views, intake, automations, threads/mentions, WIP, agent token. */
 const FEATURE_SHOWCASE_MARKER = 'Demo: Feature showcase';
 
+/**
+ * Extra coverage: calendars, generics, programs, reporting views, all task statuses, CPM links, baselines,
+ * rollup custom fields, EVM-friendly tasks, PM (Model-T) rows, portfolio dashboard widgets, guest member.
+ */
+const FULL_FEATURE_MATRIX_MARKER = 'Demo: Full feature matrix';
+
 const COLLEAGUE_EMAIL = 'colleague@vineroot.local';
 const COLLEAGUE_PASSWORD = 'Demo123456!';
+
+const GUEST_EMAIL = 'guest@vineroot.local';
+const GUEST_PASSWORD = 'Demo123456!';
 
 type DemoCtx = { userId: string; workspaceId: string };
 
@@ -692,6 +711,29 @@ async function ensureColleagueUser(workspaceId: string): Promise<string> {
   if (!m) {
     await prisma.workspaceMember.create({
       data: { workspaceId, userId: u.id, role: 'MEMBER' },
+    });
+  }
+  return u.id;
+}
+
+async function ensureGuestUser(workspaceId: string): Promise<string> {
+  let u = await prisma.user.findUnique({ where: { email: GUEST_EMAIL } });
+  if (!u) {
+    const passwordHash = await bcrypt.hash(GUEST_PASSWORD, 10);
+    u = await prisma.user.create({
+      data: {
+        email: GUEST_EMAIL,
+        passwordHash,
+        displayName: 'Demo Guest',
+      },
+    });
+  }
+  const m = await prisma.workspaceMember.findUnique({
+    where: { workspaceId_userId: { workspaceId, userId: u.id } },
+  });
+  if (!m) {
+    await prisma.workspaceMember.create({
+      data: { workspaceId, userId: u.id, role: 'GUEST' },
     });
   }
   return u.id;
@@ -1565,6 +1607,798 @@ async function seedFeatureShowcase(ctx: DemoCtx): Promise<void> {
   console.log('[seed] Feature showcase:', FEATURE_SHOWCASE_MARKER, '| colleague:', COLLEAGUE_EMAIL);
 }
 
+async function seedFullFeatureMatrix(ctx: DemoCtx): Promise<void> {
+  const { workspaceId: wsId, userId } = ctx;
+
+  const exists = await prisma.project.findFirst({
+    where: {
+      deletedAt: null,
+      name: FULL_FEATURE_MATRIX_MARKER,
+      workspaceLinks: { some: { workspaceId: wsId } },
+    },
+  });
+  if (exists) {
+    console.log('[seed] Full feature matrix project already present; skipping matrix seed.');
+    return;
+  }
+
+  const colleagueId = await ensureColleagueUser(wsId);
+  await ensureGuestUser(wsId);
+
+  const team =
+    (await prisma.team.findFirst({
+      where: { workspaceId: wsId, deletedAt: null, name: 'Demo · Field ops' },
+    })) ??
+    (await prisma.team.create({
+      data: {
+        workspaceId: wsId,
+        name: 'Demo · Field ops',
+        description: 'Second team for multi-team navigation',
+        color: '#f97316',
+        members: {
+          create: [
+            { userId: colleagueId, role: 'LEAD' },
+            { userId, role: 'MEMBER' },
+          ],
+        },
+      },
+    }));
+
+  const pMobile = await prisma.project.findFirst({
+    where: {
+      deletedAt: null,
+      name: DEMO_PROJECT_MARKER,
+      workspaceLinks: { some: { workspaceId: wsId } },
+    },
+  });
+
+  let workCal = await prisma.workCalendar.findFirst({
+    where: { workspaceId: wsId, name: 'Seed · Mon–Fri 8h (ET)' },
+  });
+  if (!workCal) {
+    workCal = await prisma.workCalendar.create({
+      data: {
+        workspaceId: wsId,
+        name: 'Seed · Mon–Fri 8h (ET)',
+        timeZone: 'America/New_York',
+        weeklyPattern: {
+          mon: 480,
+          tue: 480,
+          wed: 480,
+          thu: 480,
+          fri: 480,
+          sat: 0,
+          sun: 0,
+        },
+        exceptions: [{ date: '2026-12-25', workingMinutes: 0 }],
+        isDefault: false,
+      },
+    });
+  }
+
+  let genRes = await prisma.genericResource.findFirst({
+    where: { workspaceId: wsId, name: 'Seed · Shared CI runner' },
+  });
+  if (!genRes) {
+    genRes = await prisma.genericResource.create({
+      data: {
+        workspaceId: wsId,
+        name: 'Seed · Shared CI runner',
+        maxUnitsPercent: 200,
+        standardRatePerHour: new Prisma.Decimal('85.0000'),
+      },
+    });
+  }
+
+  await prisma.user.update({
+    where: { id: userId },
+    data: {
+      workCalendarId: workCal.id,
+      resourceStandardRatePerHour: new Prisma.Decimal('120.0000'),
+      resourceOvertimeRatePerHour: new Prisma.Decimal('180.0000'),
+    },
+  });
+
+  const matrixProject = await prisma.project.create({
+    data: {
+      teamId: team.id,
+      createdById: userId,
+      name: FULL_FEATURE_MATRIX_MARKER,
+      description:
+        'Calendars, generics, CPM links (SS + lag), baselines, EVM, rollup fields, agent metadata, strict WIP, every task status shape.',
+      color: ProjectColor.BLUE,
+      status: 'ACTIVE',
+      kanbanWipEnforcement: KanbanWipEnforcement.STRICT,
+      workCalendarId: workCal.id,
+      defaultManualSchedule: false,
+      workspaceLinks: { create: { workspaceId: wsId } },
+      members: {
+        create: [
+          { userId, role: 'OWNER' },
+          { userId: colleagueId, role: 'VIEWER' },
+        ],
+      },
+    },
+  });
+
+  const secTodo = await prisma.section.create({
+    data: { projectId: matrixProject.id, name: 'Matrix · Todo', sortOrder: 0, isDefault: true },
+  });
+  const secDoing = await prisma.section.create({
+    data: {
+      projectId: matrixProject.id,
+      name: 'Matrix · Doing',
+      sortOrder: 1,
+      isDefault: false,
+      wipLimit: 2,
+    },
+  });
+  const secDone = await prisma.section.create({
+    data: { projectId: matrixProject.id, name: 'Matrix · Done', sortOrder: 2, isDefault: false },
+  });
+
+  const tagMatrix = await prisma.tag.upsert({
+    where: { workspaceId_name: { workspaceId: wsId, name: 'matrix-seed' } },
+    create: { workspaceId: wsId, name: 'matrix-seed', color: '#eab308' },
+    update: {},
+  });
+
+  const leafPoints = await prisma.customFieldDefinition.create({
+    data: {
+      workspaceId: wsId,
+      name: 'Matrix · Leaf points',
+      type: CustomFieldType.NUMBER,
+      isRequired: false,
+      computedKind: CustomFieldComputedKind.NONE,
+    },
+  });
+  const rollupPoints = await prisma.customFieldDefinition.create({
+    data: {
+      workspaceId: wsId,
+      name: 'Matrix · Subtask rollup (sum)',
+      type: CustomFieldType.NUMBER,
+      isRequired: false,
+      computedKind: CustomFieldComputedKind.SUBTASK_ROLLUP_NUMBER,
+      rollupSourceFieldId: leafPoints.id,
+      rollupAggregation: CustomFieldRollupAggregation.SUM,
+    },
+  });
+  await prisma.projectCustomField.createMany({
+    data: [
+      { projectId: matrixProject.id, fieldId: leafPoints.id, sortOrder: 0 },
+      { projectId: matrixProject.id, fieldId: rollupPoints.id, sortOrder: 1 },
+    ],
+  });
+
+  const tEvm = await prisma.task.create({
+    data: {
+      workspaceId: wsId,
+      projectId: matrixProject.id,
+      sectionId: secDoing.id,
+      createdById: userId,
+      title: 'Matrix · EVM sample (budget + % complete)',
+      description: 'Baseline cost drives BAC; percentComplete drives EV.',
+      status: TaskStatus.IN_PROGRESS,
+      sortOrder: 0,
+      percentComplete: 45,
+      actualCost: new Prisma.Decimal('900.0000'),
+      assignees: {
+        create: {
+          userId,
+          unitsPercent: 50,
+          workMinutes: 240,
+        },
+      },
+    },
+  });
+  const evmStart = new Date();
+  evmStart.setUTCDate(evmStart.getUTCDate() - 14);
+  const evmEnd = new Date();
+  evmEnd.setUTCDate(evmEnd.getUTCDate() + 14);
+  await prisma.taskBaseline.create({
+    data: {
+      taskId: tEvm.id,
+      baselineIndex: 0,
+      baselineStart: evmStart,
+      baselineFinish: evmEnd,
+      baselineWorkMinutes: 960,
+      baselineCost: new Prisma.Decimal('2000.0000'),
+    },
+  });
+  await prisma.taskBaseline.create({
+    data: {
+      taskId: tEvm.id,
+      baselineIndex: 1,
+      baselineStart: evmStart,
+      baselineFinish: evmEnd,
+      baselineCost: new Prisma.Decimal('1900.0000'),
+    },
+  });
+
+  await prisma.taskGenericResourceAssignment.create({
+    data: {
+      taskId: tEvm.id,
+      genericResourceId: genRes.id,
+      unitsPercent: 100,
+    },
+  });
+
+  const tBlockerDone = await prisma.task.create({
+    data: {
+      workspaceId: wsId,
+      projectId: matrixProject.id,
+      sectionId: secDone.id,
+      createdById: userId,
+      title: 'Matrix · Dependency blocker (done)',
+      status: TaskStatus.DONE,
+      sortOrder: 0,
+      completedAt: utcDay(new Date()),
+      assignees: { create: { userId: colleagueId } },
+    },
+  });
+
+  const tBlocked = await prisma.task.create({
+    data: {
+      workspaceId: wsId,
+      projectId: matrixProject.id,
+      sectionId: secTodo.id,
+      createdById: userId,
+      title: 'Matrix · Status: BLOCKED (with SS dep + lag)',
+      status: TaskStatus.BLOCKED,
+      sortOrder: 1,
+    },
+  });
+  await prisma.taskDependency.create({
+    data: {
+      dependentId: tBlocked.id,
+      blockingId: tBlockerDone.id,
+      type: DependencyType.WAITING_ON,
+      linkType: ScheduleLinkType.SS,
+      lagDays: 2,
+    },
+  });
+
+  const tPred = await prisma.task.create({
+    data: {
+      workspaceId: wsId,
+      projectId: matrixProject.id,
+      sectionId: secDoing.id,
+      createdById: userId,
+      title: 'Matrix · FF predecessor',
+      status: TaskStatus.IN_PROGRESS,
+      sortOrder: 2,
+    },
+  });
+  const tFfDep = await prisma.task.create({
+    data: {
+      workspaceId: wsId,
+      projectId: matrixProject.id,
+      sectionId: secTodo.id,
+      createdById: userId,
+      title: 'Matrix · FF dependent (schedule QA)',
+      status: TaskStatus.READY,
+      sortOrder: 3,
+      isManuallyScheduled: false,
+      scheduleMode: TaskScheduleMode.FIXED_DURATION,
+      durationWorkingMinutes: 240,
+      constraintType: TaskConstraintType.SNET,
+      constraintDate: new Date(Date.UTC(2026, 5, 1)),
+      deadlineDate: new Date(Date.UTC(2026, 8, 30)),
+    },
+  });
+  await prisma.taskDependency.create({
+    data: {
+      dependentId: tFfDep.id,
+      blockingId: tPred.id,
+      type: DependencyType.BLOCKING,
+      linkType: ScheduleLinkType.FF,
+      lagDays: 0,
+    },
+  });
+
+  await prisma.task.create({
+    data: {
+      workspaceId: wsId,
+      projectId: matrixProject.id,
+      sectionId: secTodo.id,
+      createdById: userId,
+      title: 'Matrix · Status: CANCELLED',
+      status: TaskStatus.CANCELLED,
+      sortOrder: 4,
+    },
+  });
+
+  await prisma.task.create({
+    data: {
+      workspaceId: wsId,
+      projectId: matrixProject.id,
+      sectionId: secTodo.id,
+      createdById: userId,
+      title: 'Matrix · Status: ESCALATION_PENDING',
+      description: 'Escalation path QA',
+      status: TaskStatus.ESCALATION_PENDING,
+      escalationNote: 'Seeded escalation — reroute or claim in UI.',
+      sortOrder: 5,
+      actorTier: ActorTier.CREW_PLANNING,
+      domain: TaskDomain.PLANNING,
+      complexity: TaskComplexity.HIGH,
+      reviewGate: ReviewGate.FULL,
+    },
+  });
+
+  await prisma.task.create({
+    data: {
+      workspaceId: wsId,
+      projectId: matrixProject.id,
+      sectionId: secTodo.id,
+      createdById: userId,
+      title: 'Matrix · Status: BLOCKED_AWAITING_HUMAN',
+      status: TaskStatus.BLOCKED_AWAITING_HUMAN,
+      sortOrder: 6,
+    },
+  });
+
+  await prisma.task.create({
+    data: {
+      workspaceId: wsId,
+      projectId: matrixProject.id,
+      sectionId: secTodo.id,
+      createdById: userId,
+      title: 'Matrix · Status: BLOCKED_HUMAN_REROUTE',
+      status: TaskStatus.BLOCKED_HUMAN_REROUTE,
+      sortOrder: 7,
+    },
+  });
+
+  await prisma.task.create({
+    data: {
+      workspaceId: wsId,
+      projectId: matrixProject.id,
+      sectionId: secTodo.id,
+      createdById: userId,
+      title: 'Matrix · Status: REROUTED_READY',
+      status: TaskStatus.REROUTED_READY,
+      sortOrder: 8,
+    },
+  });
+
+  await prisma.task.create({
+    data: {
+      workspaceId: wsId,
+      projectId: matrixProject.id,
+      sectionId: secTodo.id,
+      createdById: userId,
+      title: 'Matrix · SPIKE: auth provider eval',
+      workItemType: TaskWorkItemType.SPIKE,
+      status: TaskStatus.BACKLOG,
+      sortOrder: 9,
+      storyPoints: 2,
+    },
+  });
+
+  const tAgent = await prisma.task.create({
+    data: {
+      workspaceId: wsId,
+      projectId: matrixProject.id,
+      sectionId: secDoing.id,
+      createdById: userId,
+      title: 'Matrix · Agent-shaped task (tiers + gates)',
+      status: TaskStatus.IN_PROGRESS,
+      sortOrder: 10,
+      actorTier: ActorTier.CLAUDE_SONNET,
+      domain: TaskDomain.BACKEND,
+      complexity: TaskComplexity.CRITICAL,
+      reviewGate: ReviewGate.CRITIC_REVIEW,
+      agentContext: { seed: true, instruction: 'Synthetic agent context blob' },
+      agentOutput: { summary: 'Seeded output placeholder' },
+      agentStartedAt: new Date(Date.now() - 3600_000),
+    },
+  });
+
+  const parentRoll = await prisma.task.create({
+    data: {
+      workspaceId: wsId,
+      projectId: matrixProject.id,
+      sectionId: secTodo.id,
+      createdById: userId,
+      title: 'Matrix · Roll-up parent',
+      status: TaskStatus.IN_PROGRESS,
+      sortOrder: 11,
+    },
+  });
+  const c1 = await prisma.task.create({
+    data: {
+      workspaceId: wsId,
+      projectId: matrixProject.id,
+      sectionId: secTodo.id,
+      parentTaskId: parentRoll.id,
+      createdById: userId,
+      title: 'Matrix · Child A (leaf points)',
+      status: TaskStatus.BACKLOG,
+      sortOrder: 0,
+    },
+  });
+  const c2 = await prisma.task.create({
+    data: {
+      workspaceId: wsId,
+      projectId: matrixProject.id,
+      sectionId: secTodo.id,
+      parentTaskId: parentRoll.id,
+      createdById: userId,
+      title: 'Matrix · Child B (leaf points)',
+      status: TaskStatus.BACKLOG,
+      sortOrder: 1,
+    },
+  });
+  await prisma.customFieldValue.createMany({
+    data: [
+      { taskId: c1.id, fieldId: leafPoints.id, value: { value: 3 } },
+      { taskId: c2.id, fieldId: leafPoints.id, value: { value: 5 } },
+    ],
+  });
+
+  await prisma.taskTag.create({ data: { taskId: tAgent.id, tagId: tagMatrix.id } });
+
+  const cHtml = await prisma.comment.create({
+    data: {
+      taskId: tAgent.id,
+      authorId: userId,
+      body: 'Plain text fallback',
+      htmlBody: '<p>Seeded <strong>rich</strong> comment for HTML rendering.</p>',
+      isAgentComment: true,
+    },
+  });
+  await prisma.commentMention.create({
+    data: { commentId: cHtml.id, userId: colleagueId },
+  });
+
+  await prisma.activityLog.create({
+    data: {
+      projectId: matrixProject.id,
+      taskId: tAgent.id,
+      actorId: userId,
+      eventType: AuditEventType.AGENT_STARTED,
+      description: 'Matrix seed: simulated agent start',
+    },
+  });
+
+  await prisma.auditLog.create({
+    data: {
+      workspaceId: wsId,
+      taskId: tAgent.id,
+      actorId: userId,
+      actorTier: ActorTier.CURSOR_COMPOSER,
+      eventType: AuditEventType.AGENT_COMPLETED,
+      description: 'Matrix seed audit row',
+      metadata: { source: 'prisma-seed' },
+    },
+  });
+
+  await prisma.notification.createMany({
+    data: [
+      {
+        recipientId: colleagueId,
+        senderId: userId,
+        type: 'MENTION',
+        title: 'Matrix seed @mention',
+        body: 'You were mentioned from the full matrix project.',
+        resourceId: tAgent.id,
+        resourceType: 'task',
+        isRead: false,
+      },
+      {
+        recipientId: userId,
+        type: 'RULE_TRIGGERED',
+        title: 'Sample rule notification',
+        body: 'Styling check for automation-driven notifications.',
+        isRead: false,
+      },
+      {
+        recipientId: userId,
+        type: 'AGENT_ACTION',
+        title: 'Sample agent action',
+        body: 'Preview of agent notification channel.',
+        resourceId: tAgent.id,
+        resourceType: 'task',
+        isRead: true,
+      },
+    ],
+  });
+
+  await prisma.automation.create({
+    data: {
+      workspaceId: wsId,
+      projectId: null,
+      name: 'Matrix · on task created (workspace)',
+      isActive: true,
+      triggerType: AutomationTriggerType.TASK_CREATED,
+      triggerConfig: {},
+      actions: {
+        create: {
+          actionType: AutomationActionType.ADD_TAG,
+          actionConfig: { tagId: tagMatrix.id },
+          sortOrder: 0,
+        },
+      },
+    },
+  });
+
+  const mainPf = await prisma.portfolio.findFirst({
+    where: { workspaceId: wsId, name: 'Demo: Product bets' },
+  });
+
+  if (mainPf && pMobile) {
+    await prisma.scheduleProgram.create({
+      data: {
+        workspaceId: wsId,
+        name: 'Seed · Cross-project program',
+        projects: {
+          create: [
+            { projectId: matrixProject.id },
+            { projectId: pMobile.id },
+          ],
+        },
+      },
+    });
+  }
+
+  const rvDup = await prisma.reportingSavedView.findFirst({
+    where: { workspaceId: wsId, name: 'Matrix · Last 30d open' },
+  });
+  if (!rvDup) {
+    await prisma.reportingSavedView.createMany({
+      data: [
+        {
+          workspaceId: wsId,
+          createdById: userId,
+          name: 'Matrix · Last 30d open',
+          sortOrder: 0,
+          config: {
+            statuses: ['BACKLOG', 'READY', 'IN_PROGRESS', 'IN_REVIEW', 'BLOCKED'],
+          },
+        },
+        {
+          workspaceId: wsId,
+          createdById: userId,
+          name: 'Matrix · This portfolio only',
+          sortOrder: 1,
+          config: mainPf ? { portfolioId: mainPf.id } : {},
+        },
+        {
+          workspaceId: wsId,
+          createdById: userId,
+          name: 'Matrix · Assignee = colleague',
+          sortOrder: 2,
+          config: { assigneeIds: [colleagueId] },
+        },
+      ],
+    });
+  }
+
+  await prisma.goal.create({
+    data: {
+      workspaceId: wsId,
+      ownerId: colleagueId,
+      name: 'Matrix · At-risk goal',
+      description: 'Secondary goal status for roadmap filters',
+      status: 'AT_RISK',
+      metrics: {
+        create: [
+          {
+            name: 'Burndown health',
+            type: 'PERCENT',
+            current: 55,
+            target: 80,
+            unit: '%',
+          },
+        ],
+      },
+    },
+  });
+
+  const arch = await prisma.project.create({
+    data: {
+      teamId: team.id,
+      createdById: userId,
+      name: 'Demo: Archived pilot',
+      description: 'Archived + completed for filters and hiding rules.',
+      color: ProjectColor.GRAY,
+      status: 'ARCHIVED',
+      isArchived: true,
+      workspaceLinks: { create: { workspaceId: wsId } },
+      members: { create: { userId, role: 'OWNER' } },
+      sections: {
+        create: { name: 'Legacy', sortOrder: 0, isDefault: true },
+      },
+    },
+    include: { sections: true },
+  });
+  const archSec = arch.sections[0];
+  if (archSec) {
+    await prisma.task.create({
+      data: {
+        workspaceId: wsId,
+        projectId: arch.id,
+        sectionId: archSec.id,
+        createdById: userId,
+        title: 'Archived pilot · residual task',
+        status: TaskStatus.DONE,
+        sortOrder: 0,
+        completedAt: utcDay(new Date()),
+      },
+    });
+  }
+
+  await prisma.project.create({
+    data: {
+      teamId: team.id,
+      createdById: userId,
+      name: 'Demo: Paused campaign',
+      description: 'Paused status without archive flag.',
+      color: ProjectColor.ORANGE,
+      status: 'PAUSED',
+      workspaceLinks: { create: { workspaceId: wsId } },
+      members: { create: { userId, role: 'OWNER' } },
+      sections: {
+        create: { name: 'Icebox', sortOrder: 0, isDefault: true },
+      },
+    },
+  });
+
+  const dashLab = await prisma.dashboard.findFirst({
+    where: { workspaceId: wsId, name: 'Demo: Portfolio & EVM lab' },
+  });
+  if (!dashLab && mainPf) {
+    await prisma.dashboard.create({
+      data: {
+        workspaceId: wsId,
+        createdById: userId,
+        name: 'Demo: Portfolio & EVM lab',
+        description: 'PROJECT_EVM + portfolio sprint widgets against seeded data',
+        color: '#0d9488',
+        layoutMeta: { schemaVersion: 1 },
+        widgets: {
+          create: [
+            {
+              type: 'PROJECT_EVM',
+              title: 'EVM (full matrix project)',
+              sortOrder: 0,
+              gridX: 0,
+              gridY: 0,
+              gridW: 6,
+              gridH: 4,
+              config: { projectId: matrixProject.id },
+            },
+            {
+              type: 'PORTFOLIO_ACTIVE_SPRINTS',
+              title: 'Active sprints (product bets)',
+              sortOrder: 1,
+              gridX: 6,
+              gridY: 0,
+              gridW: 6,
+              gridH: 4,
+              config: { portfolioId: mainPf.id },
+            },
+            {
+              type: 'PORTFOLIO_SPRINT_VELOCITY',
+              title: 'Velocity (last 8)',
+              sortOrder: 2,
+              gridX: 0,
+              gridY: 4,
+              gridW: 12,
+              gridH: 3,
+              config: { portfolioId: mainPf.id, take: 8 },
+            },
+          ],
+        },
+      },
+    });
+  }
+
+  const pmSlug = 'vineroot-seed-pm-demo';
+  const pmExisting = await prisma.pmProject.findUnique({ where: { slug: pmSlug } });
+  if (!pmExisting) {
+    const pmProj = await prisma.pmProject.create({
+      data: {
+        slug: pmSlug,
+        name: 'Seed: Model-T PM',
+        status: 'PHASE_1',
+        metadata: { seeded: true },
+      },
+    });
+    const tidDone = `pmseed_done_${randomBytes(6).toString('hex')}`;
+    const tidReady = `pmseed_ready_${randomBytes(6).toString('hex')}`;
+    await prisma.pmTask.create({
+      data: {
+        id: tidDone,
+        projectId: pmProj.id,
+        phase: 1,
+        title: 'Seed · Baseline task (DONE)',
+        description: 'Blocks the ready task until marked DONE — satisfies get_ready_tasks.',
+        actorTier: 'CREW_BACKEND',
+        domain: 'BACKEND',
+        complexity: 'LOW',
+        status: 'DONE',
+      },
+    });
+    await prisma.pmTask.create({
+      data: {
+        id: tidReady,
+        projectId: pmProj.id,
+        phase: 1,
+        title: 'Seed · Ready task (PENDING, deps satisfied)',
+        description: 'Should appear in get_ready_tasks for this project.',
+        actorTier: 'CURSOR_COMPOSER',
+        domain: 'GENERAL',
+        complexity: 'MEDIUM',
+        status: 'PENDING',
+        reviewGate: 'HUMAN_SIGNOFF',
+      },
+    });
+    await prisma.pmTaskDependency.create({
+      data: { taskId: tidReady, dependsOnId: tidDone },
+    });
+    const gate = await prisma.pmHumanGate.create({
+      data: {
+        projectId: pmProj.id,
+        gateType: 'REVIEW',
+        originatingTaskId: tidReady,
+        contextSummary: 'Seeded human gate for PM UI / API checks',
+        decisionOptions: [
+          { id: 'approve', label: 'Approve' },
+          { id: 'reject', label: 'Reject' },
+        ],
+        status: 'PENDING',
+      },
+    });
+    await prisma.pmTaskArtifact.create({
+      data: {
+        taskId: tidReady,
+        artifactType: 'markdown',
+        name: 'seed-notes.md',
+        content: '# Seeded artifact\n\nPM dashboard attachment smoke test.',
+      },
+    });
+    await prisma.pmTaskRun.create({
+      data: {
+        taskId: tidReady,
+        runNumber: 1,
+        actorTier: 'CURSOR_COMPOSER',
+        outcome: 'PARTIAL',
+        outputSummary: 'Seeded run row',
+      },
+    });
+    await prisma.pmAuditLog.create({
+      data: {
+        projectId: pmProj.id,
+        taskId: tidReady,
+        gateId: gate.id,
+        eventType: 'GATE_OPENED',
+        actor: 'seed',
+        detail: { source: 'prisma-seed' },
+      },
+    });
+    await prisma.pmRagIngestionLog.create({
+      data: {
+        projectId: pmProj.id,
+        sourcePath: '/docs/seed-overview.md',
+        chunkCount: 12,
+        collection: 'seed',
+        contentHash: 'seedhash1',
+      },
+    });
+  }
+
+  console.log(
+    '[seed] Full feature matrix:',
+    FULL_FEATURE_MATRIX_MARKER,
+    '| guest:',
+    GUEST_EMAIL,
+    '| PM slug:',
+    pmSlug,
+  );
+}
+
 async function seedDashboards(wsId: string, userId: string): Promise<void> {
   const dup = await prisma.dashboard.findFirst({
     where: { workspaceId: wsId, name: 'Demo: Workspace overview' },
@@ -1690,16 +2524,23 @@ async function main() {
     '[seed] Try projects:',
     FEATURE_SHOWCASE_MARKER,
     '|',
+    FULL_FEATURE_MATRIX_MARKER,
+    '|',
     PARITY_PLAYGROUND_MARKER,
     '|',
     PARITY_BLUEPRINT_MARKER,
   );
   console.log('[seed] Second account (mentions / workload):', COLLEAGUE_EMAIL, '/', COLLEAGUE_PASSWORD);
+  console.log('[seed] Guest (workspace GUEST role):', GUEST_EMAIL, '/', GUEST_PASSWORD);
   console.log('[seed] ─────────────────────────────────────────────');
+
+  await ensureColleagueUser(ctx.workspaceId);
+  await ensureGuestUser(ctx.workspaceId);
 
   await seedRichDemoData(ctx);
   await seedDevParityPlayground(ctx);
   await seedFeatureShowcase(ctx);
+  await seedFullFeatureMatrix(ctx);
   await seedDashboards(ctx.workspaceId, ctx.userId);
 
   const ws = await prisma.workspace.findUnique({ where: { id: ctx.workspaceId } });

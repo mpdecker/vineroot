@@ -10,20 +10,37 @@ import {
   resolvePortfolioActiveSprints,
   resolvePortfolioSprintVelocity,
 } from './portfolio-sprint-widgets.util';
+import { resolveWorkspaceNumberMetric } from '../reporting/workspace-reporting.util';
 import type {
+  ApplyDashboardLayoutPresetRequest,
+  CreateDashboardFromTemplateRequest,
   DashboardDto,
+  DashboardLayoutPresetSummaryDto,
+  DashboardTemplateSummaryDto,
   DashboardWidgetDto,
   DashboardWidgetType,
   CreateDashboardRequest,
+  DuplicateDashboardRequest,
   UpdateDashboardRequest,
   CreateDashboardWidgetRequest,
   UpdateDashboardWidgetRequest,
 } from '@vineroot/shared-types';
+import { ScheduleProjectService } from '../schedule/schedule-project.service';
+import {
+  computeAssignmentsForPreset,
+  getLayoutPreset,
+  listLayoutPresetSummaries,
+} from './dashboard-layout-presets';
+import {
+  getDashboardTemplate,
+  listDashboardTemplateSummaries,
+} from './dashboard-templates';
 
 const WIDGET_TYPES: DashboardWidgetType[] = [
   'TASKS_BY_STATUS',
   'PROJECT_SUMMARY',
   'PROJECT_CFD',
+  'PROJECT_EVM',
   'PORTFOLIO_ACTIVE_SPRINTS',
   'PORTFOLIO_SPRINT_VELOCITY',
   'NUMBER_METRIC',
@@ -35,7 +52,10 @@ const widgetsOrdered = { orderBy: { sortOrder: 'asc' as const } } as const;
 
 @Injectable()
 export class DashboardService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private scheduleProject: ScheduleProjectService,
+  ) {}
 
   private assertWidgetType(t: string): asserts t is DashboardWidgetType {
     if (!WIDGET_TYPES.includes(t as DashboardWidgetType)) {
@@ -77,7 +97,7 @@ export class DashboardService {
       updatedAt: d.updatedAt,
       layoutMeta: (d.layoutMeta as Record<string, unknown>) ?? undefined,
       widgetCount,
-      ...(includeWidgets && widgets?.length
+      ...(includeWidgets && widgets != null
         ? { widgets: widgets.map((w) => this.widgetToDto(w)) }
         : {}),
     };
@@ -115,6 +135,7 @@ export class DashboardService {
     workspaceId: string,
     id: string,
     withResolved: boolean,
+    viewerUserId?: string,
   ): Promise<DashboardDto | null> {
     const d = await this.prisma.dashboard.findFirst({
       where: { id, workspaceId },
@@ -126,7 +147,12 @@ export class DashboardService {
     }
     const widgets: DashboardWidgetDto[] = [];
     for (const w of d.widgets) {
-      const resolved = await this.resolveWidget(workspaceId, w.type, w.config);
+      const resolved = await this.resolveWidget(
+        workspaceId,
+        w.type,
+        w.config,
+        viewerUserId,
+      );
       widgets.push(this.widgetToDto(w, resolved));
     }
     const base = this.dashboardToDto(d, false);
@@ -163,6 +189,155 @@ export class DashboardService {
     });
     if (!existing) throw new NotFoundException('Dashboard not found');
     await this.prisma.dashboard.delete({ where: { id } });
+  }
+
+  listLayoutPresets(): DashboardLayoutPresetSummaryDto[] {
+    return listLayoutPresetSummaries();
+  }
+
+  listDashboardTemplates(): DashboardTemplateSummaryDto[] {
+    return listDashboardTemplateSummaries();
+  }
+
+  async createFromTemplate(
+    workspaceId: string,
+    userId: string,
+    req: CreateDashboardFromTemplateRequest,
+  ): Promise<DashboardDto> {
+    const template = getDashboardTemplate(req.templateId);
+    if (!template) {
+      throw new BadRequestException(`Unknown template: ${req.templateId}`);
+    }
+    const name = req.name?.trim() || template.name;
+    return this.prisma.$transaction(async (tx) => {
+      const d = await tx.dashboard.create({
+        data: {
+          workspaceId,
+          createdById: userId,
+          name,
+          layoutMeta:
+            template.layoutMeta === undefined
+              ? undefined
+              : (template.layoutMeta as Prisma.InputJsonValue),
+        },
+      });
+      for (const w of template.widgets) {
+        await tx.dashboardWidget.create({
+          data: {
+            dashboardId: d.id,
+            type: w.type,
+            title: w.title,
+            sortOrder: w.sortOrder,
+            gridX: w.gridX,
+            gridY: w.gridY,
+            gridW: w.gridW,
+            gridH: w.gridH,
+            config: w.config as Prisma.InputJsonValue,
+          },
+        });
+      }
+      const full = await tx.dashboard.findFirst({
+        where: { id: d.id, workspaceId },
+        include: { widgets: widgetsOrdered },
+      });
+      if (!full) throw new NotFoundException('Dashboard not found');
+      return this.dashboardToDto(full, true);
+    });
+  }
+
+  async duplicateDashboard(
+    workspaceId: string,
+    dashboardId: string,
+    userId: string,
+    req: DuplicateDashboardRequest,
+  ): Promise<DashboardDto> {
+    const src = await this.prisma.dashboard.findFirst({
+      where: { id: dashboardId, workspaceId },
+      include: { widgets: widgetsOrdered },
+    });
+    if (!src) throw new NotFoundException('Dashboard not found');
+    const name = req.name?.trim() || `${src.name} (copy)`;
+    return this.prisma.$transaction(async (tx) => {
+      const d = await tx.dashboard.create({
+        data: {
+          workspaceId,
+          createdById: userId,
+          name,
+          description: src.description ?? undefined,
+          color: src.color ?? undefined,
+          layoutMeta:
+            src.layoutMeta === null || src.layoutMeta === undefined
+              ? undefined
+              : (src.layoutMeta as Prisma.InputJsonValue),
+        },
+      });
+      for (const w of src.widgets) {
+        await tx.dashboardWidget.create({
+          data: {
+            dashboardId: d.id,
+            type: w.type,
+            title: w.title,
+            sortOrder: w.sortOrder,
+            gridX: w.gridX,
+            gridY: w.gridY,
+            gridW: w.gridW,
+            gridH: w.gridH,
+            config: (w.config ?? {}) as Prisma.InputJsonValue,
+          },
+        });
+      }
+      const full = await tx.dashboard.findFirst({
+        where: { id: d.id, workspaceId },
+        include: { widgets: widgetsOrdered },
+      });
+      if (!full) throw new NotFoundException('Dashboard not found');
+      return this.dashboardToDto(full, true);
+    });
+  }
+
+  async applyLayoutPreset(
+    workspaceId: string,
+    dashboardId: string,
+    req: ApplyDashboardLayoutPresetRequest,
+  ): Promise<DashboardDto> {
+    await this.ensureDashboard(workspaceId, dashboardId);
+    if (!getLayoutPreset(req.presetId)) {
+      throw new BadRequestException(`Unknown layout preset: ${req.presetId}`);
+    }
+    const widgets = await this.prisma.dashboardWidget.findMany({
+      where: { dashboardId },
+    });
+    const assignments = computeAssignmentsForPreset(
+      widgets.map((w) => ({
+        id: w.id,
+        sortOrder: w.sortOrder,
+        gridX: w.gridX,
+        gridY: w.gridY,
+        gridW: w.gridW,
+        gridH: w.gridH,
+      })),
+      req.presetId,
+    );
+    await this.prisma.$transaction(
+      assignments.map((a) =>
+        this.prisma.dashboardWidget.update({
+          where: { id: a.id },
+          data: {
+            gridX: a.gridX,
+            gridY: a.gridY,
+            gridW: a.gridW,
+            gridH: a.gridH,
+            sortOrder: a.sortOrder,
+          },
+        }),
+      ),
+    );
+    const full = await this.prisma.dashboard.findFirst({
+      where: { id: dashboardId, workspaceId },
+      include: { widgets: widgetsOrdered },
+    });
+    if (!full) throw new NotFoundException('Dashboard not found');
+    return this.dashboardToDto(full, true);
   }
 
   async addWidget(
@@ -243,6 +418,7 @@ export class DashboardService {
     workspaceId: string,
     type: string,
     configJson: unknown,
+    viewerUserId?: string,
   ): Promise<Record<string, unknown>> {
     const config =
       configJson && typeof configJson === 'object'
@@ -348,6 +524,37 @@ export class DashboardService {
         );
         return { projectId, days, statusOrder };
       }
+      case 'PROJECT_EVM': {
+        const projectId = config.projectId as string | undefined;
+        if (!projectId) {
+          return { error: 'Add projectId in widget config' };
+        }
+        if (!viewerUserId) {
+          return { error: 'Authenticated user required for EVM widget' };
+        }
+        const p = await this.prisma.project.findFirst({
+          where: {
+            id: projectId,
+            deletedAt: null,
+            workspaceLinks: { some: { workspaceId } },
+          },
+          select: { id: true },
+        });
+        if (!p) return { error: 'Project not found in workspace' };
+        try {
+          const evm = await this.scheduleProject.evm(
+            projectId,
+            viewerUserId,
+            false,
+          );
+          return { projectId, ...evm };
+        } catch (e) {
+          if (e instanceof NotFoundException) {
+            return { error: 'Project not found or no access' };
+          }
+          throw e;
+        }
+      }
       case 'PORTFOLIO_ACTIVE_SPRINTS': {
         const portfolioId = config.portfolioId as string | undefined;
         if (!portfolioId) {
@@ -374,11 +581,39 @@ export class DashboardService {
         );
         return { ...out } as Record<string, unknown>;
       }
-      case 'NUMBER_METRIC':
+      case 'NUMBER_METRIC': {
+        if (config.metric != null || config.reportingFilters != null) {
+          const r = await resolveWorkspaceNumberMetric(
+            this.prisma,
+            workspaceId,
+            config as Record<string, unknown>,
+          );
+          if ('error' in r) {
+            return { error: r.error };
+          }
+          const out: Record<string, unknown> = {
+            value: r.value,
+            label: r.label,
+            ...(r.period != null ? { period: r.period } : {}),
+            ...(r.sparkline != null ? { sparkline: r.sparkline } : {}),
+          };
+          if (config.displayFormat != null) {
+            out.displayFormat = config.displayFormat;
+          }
+          if (config.chartMode != null) {
+            out.chartMode = config.chartMode;
+          }
+          return out;
+        }
         return {
           value: Number(config.value ?? 0),
           label: String(config.label ?? 'Metric'),
+          ...(config.displayFormat != null && {
+            displayFormat: config.displayFormat,
+          }),
+          ...(config.chartMode != null && { chartMode: config.chartMode }),
         };
+      }
       case 'AGENT_SLOT':
         return {
           state: 'ready',

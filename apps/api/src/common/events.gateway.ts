@@ -3,6 +3,7 @@ import {
   WebSocketServer,
   SubscribeMessage,
   ConnectedSocket,
+  MessageBody,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { Injectable } from '@nestjs/common';
@@ -25,8 +26,11 @@ export class EventsGateway {
   @SubscribeMessage('join:workspace')
   handleJoinWorkspace(
     @ConnectedSocket() client: Socket,
-    data: { workspaceId: string; userId: string },
+    @MessageBody() data: { workspaceId: string; userId: string },
   ) {
+    if (!data?.workspaceId || !data?.userId) {
+      return;
+    }
     const roomName = `workspace:${data.workspaceId}`;
     client.join(roomName);
 
@@ -41,8 +45,11 @@ export class EventsGateway {
   @SubscribeMessage('join:task')
   handleJoinTask(
     @ConnectedSocket() client: Socket,
-    data: { taskId: string; workspaceId: string },
+    @MessageBody() data: { taskId: string; workspaceId: string },
   ) {
+    if (!data?.taskId) {
+      return;
+    }
     const roomName = `task:${data.taskId}`;
     client.join(roomName);
   }
@@ -50,8 +57,11 @@ export class EventsGateway {
   @SubscribeMessage('leave:workspace')
   handleLeaveWorkspace(
     @ConnectedSocket() client: Socket,
-    data: { workspaceId: string; userId: string },
+    @MessageBody() data: { workspaceId: string; userId: string },
   ) {
+    if (!data?.workspaceId || !data?.userId) {
+      return;
+    }
     const roomName = `workspace:${data.workspaceId}`;
     client.leave(roomName);
 

@@ -9,6 +9,7 @@ import {
   useUpdateGoal,
   useDeleteGoal,
   useCreateGoalMetric,
+  useRecomputeGoalMetric,
 } from './useGoals';
 import { GoalStatus, GoalMetricType, type GoalDto } from '@vineroot/shared-types';
 
@@ -129,5 +130,20 @@ describe('useGoals hooks', () => {
       type: GoalMetricType.PERCENT,
       target: 100,
     });
+  });
+
+  it('useRecomputeGoalMetric posts recompute endpoint', async () => {
+    mockedApi.post.mockResolvedValue({ data: sampleGoal });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    const { result } = renderHook(() => useRecomputeGoalMetric('ws-1'), {
+      wrapper: wrapper(client),
+    });
+
+    await result.current.mutateAsync('m1');
+
+    expect(mockedApi.post).toHaveBeenCalledWith(
+      '/workspaces/ws-1/goals/metrics/m1/recompute',
+    );
   });
 });

@@ -38,7 +38,8 @@ export class WorkspaceGuard implements CanActivate {
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest();
     const user = request.user;
-    const workspaceId = request.params.workspaceId;
+    const workspaceId =
+      request.params.workspaceId ?? request.params.id;
 
     if (!workspaceId) {
       return true;
@@ -64,6 +65,27 @@ export class WorkspaceGuard implements CanActivate {
     }
 
     request.workspace = membership;
+    return true;
+  }
+}
+
+/**
+ * Requires an authenticated workspace member who is not a GUEST.
+ * Use after JwtAuthGuard + WorkspaceGuard (request.workspace must be set).
+ */
+@Injectable()
+export class WorkspaceMemberWriteGuard implements CanActivate {
+  canActivate(context: ExecutionContext): boolean {
+    const request = context.switchToHttp().getRequest();
+    const membership = request.workspace as { role?: string } | undefined;
+    if (!membership?.role) {
+      throw new ForbiddenException('Workspace membership required');
+    }
+    if (membership.role === 'GUEST') {
+      throw new ForbiddenException(
+        'Guests cannot create or modify dashboards and widgets',
+      );
+    }
     return true;
   }
 }
@@ -115,7 +137,8 @@ export class WorkspaceAdminGuard implements CanActivate {
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest();
-    const workspaceId = request.params.workspaceId;
+    const workspaceId =
+      request.params.workspaceId ?? request.params.id;
     const userId = request.user?.userId;
 
     if (!workspaceId || !userId) {

@@ -103,4 +103,27 @@ describe('TaskRow', () => {
     );
     expect(screen.getByText('Alpha sprint')).toBeInTheDocument();
   });
+
+  it('renders schedule insight chips when provided', () => {
+    render(
+      <TaskRow
+        task={buildTask()}
+        onSelect={vi.fn()}
+        onStatusChange={vi.fn()}
+        scheduleInsight={{
+          onCriticalPath: true,
+          slackLabel: '2w slack',
+          deadlineBreached: true,
+        }}
+      />,
+    );
+    expect(screen.getByText('CP')).toBeInTheDocument();
+    expect(screen.getByText('2w slack')).toBeInTheDocument();
+    expect(screen.getByText('Deadline')).toBeInTheDocument();
+  });
+
+  it('omits schedule chips when scheduleInsight is absent', () => {
+    render(<TaskRow task={buildTask()} onSelect={vi.fn()} onStatusChange={vi.fn()} />);
+    expect(screen.queryByText('CP')).not.toBeInTheDocument();
+  });
 });

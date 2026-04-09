@@ -217,6 +217,14 @@ export interface AuthResponse {
 export interface RefreshTokenRequest {
     refreshToken: string;
 }
+export interface UpdateProfileRequest {
+    displayName?: string;
+    timezone?: string;
+}
+export interface ChangePasswordRequest {
+    currentPassword: string;
+    newPassword: string;
+}
 export interface WorkspaceDto {
     id: string;
     name: string;

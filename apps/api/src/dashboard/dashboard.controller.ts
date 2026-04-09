@@ -9,17 +9,29 @@ import {
   Query,
   UseGuards,
   Req,
+  NotFoundException,
 } from '@nestjs/common';
 import { DashboardService } from './dashboard.service';
-import { JwtAuthGuard, WorkspaceGuard } from '../auth/guards';
+import {
+  JwtAuthGuard,
+  WorkspaceGuard,
+  WorkspaceMemberWriteGuard,
+} from '../auth/guards';
 import type {
   DashboardDto,
+  DashboardLayoutPresetSummaryDto,
+  DashboardTemplateSummaryDto,
   CreateDashboardRequest,
   UpdateDashboardRequest,
-  CreateDashboardWidgetRequest,
-  UpdateDashboardWidgetRequest,
   DashboardWidgetDto,
 } from '@vineroot/shared-types';
+import {
+  ApplyDashboardLayoutPresetBodyDto,
+  CreateDashboardFromTemplateBodyDto,
+  CreateDashboardWidgetBodyDto,
+  DuplicateDashboardBodyDto,
+  UpdateDashboardWidgetBodyDto,
+} from './dashboard-request.dto';
 
 @Controller('api/v1/workspaces/:workspaceId/dashboards')
 @UseGuards(JwtAuthGuard, WorkspaceGuard)
@@ -32,6 +44,7 @@ export class DashboardController {
   }
 
   @Post()
+  @UseGuards(WorkspaceMemberWriteGuard)
   async create(
     @Param('workspaceId') workspaceId: string,
     @Req() req: { user: { userId: string } },
@@ -40,21 +53,56 @@ export class DashboardController {
     return this.dashboardService.create(workspaceId, req.user.userId, body);
   }
 
+  @Get('layout-presets')
+  async layoutPresets(): Promise<{
+    presets: DashboardLayoutPresetSummaryDto[];
+  }> {
+    return { presets: this.dashboardService.listLayoutPresets() };
+  }
+
+  @Get('templates')
+  async templates(): Promise<{
+    templates: DashboardTemplateSummaryDto[];
+  }> {
+    return { templates: this.dashboardService.listDashboardTemplates() };
+  }
+
+  @Post('from-template')
+  @UseGuards(WorkspaceMemberWriteGuard)
+  async createFromTemplate(
+    @Param('workspaceId') workspaceId: string,
+    @Req() req: { user: { userId: string } },
+    @Body() body: CreateDashboardFromTemplateBodyDto,
+  ): Promise<DashboardDto> {
+    return this.dashboardService.createFromTemplate(
+      workspaceId,
+      req.user.userId,
+      body,
+    );
+  }
+
   @Get(':dashboardId')
   async findOne(
     @Param('workspaceId') workspaceId: string,
     @Param('dashboardId') dashboardId: string,
+    @Req() req: { user: { userId: string } },
     @Query('resolved') resolved?: string,
-  ): Promise<DashboardDto | null> {
+  ): Promise<DashboardDto> {
     const withResolved = resolved !== '0' && resolved !== 'false';
-    return this.dashboardService.findByIdInWorkspace(
+    const d = await this.dashboardService.findByIdInWorkspace(
       workspaceId,
       dashboardId,
       withResolved,
+      req.user.userId,
     );
+    if (!d) {
+      throw new NotFoundException('Dashboard not found');
+    }
+    return d;
   }
 
   @Patch(':dashboardId')
+  @UseGuards(WorkspaceMemberWriteGuard)
   async update(
     @Param('workspaceId') workspaceId: string,
     @Param('dashboardId') dashboardId: string,
@@ -64,6 +112,7 @@ export class DashboardController {
   }
 
   @Delete(':dashboardId')
+  @UseGuards(WorkspaceMemberWriteGuard)
   async remove(
     @Param('workspaceId') workspaceId: string,
     @Param('dashboardId') dashboardId: string,
@@ -71,21 +120,53 @@ export class DashboardController {
     return this.dashboardService.deleteInWorkspace(workspaceId, dashboardId);
   }
 
+  @Post(':dashboardId/duplicate')
+  @UseGuards(WorkspaceMemberWriteGuard)
+  async duplicate(
+    @Param('workspaceId') workspaceId: string,
+    @Param('dashboardId') dashboardId: string,
+    @Req() req: { user: { userId: string } },
+    @Body() body: DuplicateDashboardBodyDto,
+  ): Promise<DashboardDto> {
+    return this.dashboardService.duplicateDashboard(
+      workspaceId,
+      dashboardId,
+      req.user.userId,
+      body,
+    );
+  }
+
+  @Post(':dashboardId/apply-layout-preset')
+  @UseGuards(WorkspaceMemberWriteGuard)
+  async applyLayoutPreset(
+    @Param('workspaceId') workspaceId: string,
+    @Param('dashboardId') dashboardId: string,
+    @Body() body: ApplyDashboardLayoutPresetBodyDto,
+  ): Promise<DashboardDto> {
+    return this.dashboardService.applyLayoutPreset(
+      workspaceId,
+      dashboardId,
+      body,
+    );
+  }
+
   @Post(':dashboardId/widgets')
+  @UseGuards(WorkspaceMemberWriteGuard)
   async addWidget(
     @Param('workspaceId') workspaceId: string,
     @Param('dashboardId') dashboardId: string,
-    @Body() body: CreateDashboardWidgetRequest,
+    @Body() body: CreateDashboardWidgetBodyDto,
   ): Promise<DashboardWidgetDto> {
     return this.dashboardService.addWidget(workspaceId, dashboardId, body);
   }
 
   @Patch(':dashboardId/widgets/:widgetId')
+  @UseGuards(WorkspaceMemberWriteGuard)
   async updateWidget(
     @Param('workspaceId') workspaceId: string,
     @Param('dashboardId') dashboardId: string,
     @Param('widgetId') widgetId: string,
-    @Body() body: UpdateDashboardWidgetRequest,
+    @Body() body: UpdateDashboardWidgetBodyDto,
   ): Promise<DashboardWidgetDto> {
     return this.dashboardService.updateWidget(
       workspaceId,
@@ -96,6 +177,7 @@ export class DashboardController {
   }
 
   @Delete(':dashboardId/widgets/:widgetId')
+  @UseGuards(WorkspaceMemberWriteGuard)
   async removeWidget(
     @Param('workspaceId') workspaceId: string,
     @Param('dashboardId') dashboardId: string,

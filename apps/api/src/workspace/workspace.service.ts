@@ -5,6 +5,7 @@ import {
   UpdateWorkspaceRequest,
   WorkspaceDto,
   InviteMemberRequest,
+  UserDto,
 } from '@vineroot/shared-types';
 import { randomBytes } from 'crypto';
 
@@ -193,6 +194,20 @@ export class WorkspaceService {
     return this.findById(workspaceId);
   }
 
+  private userToPublicDto(user: any): UserDto {
+    return {
+      id: user.id,
+      email: user.email,
+      displayName: user.displayName,
+      avatarUrl: user.avatarUrl,
+      isAgent: user.isAgent,
+      agentTier: user.agentTier,
+      timezone: user.timezone,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
+    };
+  }
+
   private workspaceToDto(workspace: any): WorkspaceDto {
     return {
       id: workspace.id,
@@ -209,7 +224,7 @@ export class WorkspaceService {
         userId: m.userId,
         workspaceId: m.workspaceId,
         role: m.role,
-        user: m.user,
+        user: this.userToPublicDto(m.user),
         joinedAt: m.joinedAt,
       })),
     };

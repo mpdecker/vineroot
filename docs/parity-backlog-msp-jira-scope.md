@@ -29,7 +29,7 @@ Items are grouped by domain. “Partial” rows in the main matrix imply additio
 |------|--------|--------|
 | **Formula / computed fields** (expression, dependencies, cycle detection, read-only or materialized) | `asana-parity.md` depth + “Next feature expansion” | Schema + eval engine + invalidation on dependency change. |
 | **Roll-up as custom field** (sum/count/min/max over subtasks) | Custom fields depth table | Alternative: keep roll-ups on epics/points APIs only. |
-| **S3-compatible (or ModelT) attachment storage** | `asana-parity.md` roadmap #1 + next expansion | Replace local disk without breaking upload/download contract. |
+| **Attachment storage beyond env toggle** | `asana-parity.md` roadmap #1 | **S3 path exists:** `S3_BUCKET` + AWS creds → `S3AttachmentStorage` via `AttachmentStorageRouter`; local disk otherwise. **Leftover:** ModelT blob contract, cross-region, or mandated scanning beyond MIME/extension policy. |
 
 ### 1.3 Subtasks, dependencies, tasks
 
@@ -71,7 +71,7 @@ These remain **broad buckets** until broken into own depth tables:
 
 | Item | Source | Notes |
 |------|--------|--------|
-| **Epic dashboard** (full panel beyond header strip + roadmap) | `asana-parity.md` #9, `pm-views-agile-roadmap.md` Phase D | Scope: metrics, child table, risks, links — product definition needed. |
+| **Epic dashboard depth** | `asana-parity.md` #9, `pm-views-agile-roadmap.md` Phase D | **Epics** project tab + `ProjectEpicDashboardView` shipped. **Leftover:** richer metrics, child table, risks, links — product definition. |
 | **WIP limits / Kanban policies** per section/column | PM doc gaps + Phase D TBD | Enforcement on move/create; optional override roles. |
 | **Portfolio sprint widgets** / cross-project sprint health | PM doc gaps + Phase C TBD | Dashboards exist but not fully wired to sprint metrics portfolio-wide. |
 | **Richer dashboard suite** | PM doc suggested order #5 | More widgets, layout, drill-down. |
@@ -88,6 +88,20 @@ These remain **broad buckets** until broken into own depth tables:
 
 The PM roadmap lists **full MS Project parity** as a **non-goal near term**. This section **scopes** what that would mean if Vineroot ever pursued it in **phases**, without committing to delivery.
 
+**Implementation status (2026-04):** calendars, server CPM (including **merged program CPM** when the focal project is in a schedule program), baselines **0–10**, leveling/overallocation APIs (including **program scope** and **day/week** buckets), EVM (**`baselineIndex`**, budget tasks, OT, cost ledger, PV/EV modes), schedule programs, cross-project dependencies, and timeline/network **server critical path** + **driving edges** are shipped — see [`ms-project-parity.md`](./ms-project-parity.md) for decisions and API map.
+
+**Phase 5 deepen (traceability):** URL-synced timephased query params, saved views for **timephased** / **network**, list-row schedule chips from server CPM, and network edge tooltips are catalogued with IDs **D-01–D-10** and optional hardening **T-01–T-05** in [`ms-project-full-parity-implementation-plan.md`](./ms-project-full-parity-implementation-plan.md) §9.
+
+### 3.5 MS Project gap IDs — backlog truth (sync with full plan)
+
+Do **not** duplicate shipped work in Jira. The master **ID → Shipped / Partial / Open** table is **[`ms-project-full-parity-implementation-plan.md`](./ms-project-full-parity-implementation-plan.md) §2.1**. Update this subsection only when that table changes.
+
+| Bucket | IDs (see §2.1 for detail) |
+|--------|---------------------------|
+| **Shipped** | **E-01, E-02, E-03, E-05, E-08**, **R-01, R-02, R-04**, **C-01–C-05**, **S-02**, **V-04** |
+| **Partial** | **E-04, E-06**, **R-03**, **V-01, V-02, V-03**, **F-02** |
+| **Open / deferred** | **E-07**, **R-05**, **S-01, S-03**, **F-01** |
+
 ### 3.1 Already adjacent in Vineroot
 
 - Bar schedule (**Timeline**), **dependencies** (FS-style graph), **critical path**, **milestones**, **WBS** indentation, **workload** grid by assignee × week, **multi-zoom** timeline.
@@ -99,7 +113,7 @@ The PM roadmap lists **full MS Project parity** as a **non-goal near term**. Thi
 | **Calendars** | Project calendar + exceptions, resource calendars | `WorkCalendar` per workspace/project; exceptions; optional resource calendar |
 | **Effort vs duration** | Work, duration, units (% allocation) | Extend `Task` with `workHours` / `durationDays` / fixed-work vs fixed-duration mode |
 | **Resource leveling** | Delay/split tasks to resolve overallocations | Heuristic post-process on dated tasks + assignee capacity; UI “level now” |
-| **Baseline** | Baseline start/finish/work vs actual | `TaskBaseline` snapshot rows (1–3 baselines) + variance columns on timeline |
+| **Baseline** | Baseline start/finish/work vs actual | `TaskBaseline` snapshot rows (**0–10** indices) + variance / EVM vs selected baseline |
 | **Constraint types** | ASAP, ALAP, SNET, SNLT, MSO, MFO | Enum on task schedule; solver respects when computing dates |
 | **Lag / lead on dependencies** | Dependency offset days | `TaskDependency.lagDays` (positive lag, negative lead) |
 
@@ -176,3 +190,5 @@ This stays **below** full Jira ScriptRunner parity but addresses “**complex po
 
 - [`asana-parity.md`](./asana-parity.md) — matrix, roadmap order, search/CF depth, changelog.
 - [`pm-views-agile-roadmap.md`](./pm-views-agile-roadmap.md) — phases A–D, charts, epic/backlog/sprint UI, explicit non-goals.
+- [`ms-project-full-parity-implementation-plan.md`](./ms-project-full-parity-implementation-plan.md) — **§2.1** ID reconciliation (shipped vs open), **§3** historical gap text, **§9** Phase 5 deepen IDs.
+- [`ms-project-parity.md`](./ms-project-parity.md) — product decisions, API map, EVM and split/contour behavior.

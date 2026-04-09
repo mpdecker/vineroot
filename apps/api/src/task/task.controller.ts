@@ -25,8 +25,16 @@ import {
   UpdateTaskRequest,
   ReorderTasksRequest,
   AddTaskDependencyRequest,
+  UpdateTaskDependencyScheduleRequest,
   CreateTaskAttachmentRequest,
   DuplicateTaskRequest,
+  AddTaskGenericResourceAssignmentRequest,
+  PatchTaskGenericResourceAssignmentRequest,
+  AddTaskAssigneeRequest,
+  PatchTaskAssigneeRequest,
+  CreateTaskCostEntryRequest,
+  TaskCostEntryDto,
+  UpdateTaskCostEntryRequest,
 } from '@vineroot/shared-types';
 
 @Controller('api/v1')
@@ -44,6 +52,66 @@ export class TaskController {
     @Query('assigneeId') assigneeId?: string,
   ): Promise<TaskDto[]> {
     return this.taskService.listByProject(projectId, { status, assigneeId });
+  }
+
+  @Get('projects/:projectId/tasks/:taskId/cost-entries')
+  async listCostEntries(
+    @Param('projectId') projectId: string,
+    @Param('taskId') taskId: string,
+    @Request() req: any,
+  ): Promise<TaskCostEntryDto[]> {
+    return this.taskService.listTaskCostEntries(
+      projectId,
+      taskId,
+      req.user.userId,
+    );
+  }
+
+  @Post('projects/:projectId/tasks/:taskId/cost-entries')
+  async createCostEntry(
+    @Param('projectId') projectId: string,
+    @Param('taskId') taskId: string,
+    @Request() req: any,
+    @Body() body: CreateTaskCostEntryRequest,
+  ): Promise<TaskCostEntryDto> {
+    return this.taskService.createTaskCostEntry(
+      projectId,
+      taskId,
+      req.user.userId,
+      body,
+    );
+  }
+
+  @Patch('projects/:projectId/tasks/:taskId/cost-entries/:entryId')
+  async patchCostEntry(
+    @Param('projectId') projectId: string,
+    @Param('taskId') taskId: string,
+    @Param('entryId') entryId: string,
+    @Request() req: any,
+    @Body() body: UpdateTaskCostEntryRequest,
+  ): Promise<TaskCostEntryDto> {
+    return this.taskService.patchTaskCostEntry(
+      projectId,
+      taskId,
+      entryId,
+      req.user.userId,
+      body,
+    );
+  }
+
+  @Delete('projects/:projectId/tasks/:taskId/cost-entries/:entryId')
+  async deleteCostEntry(
+    @Param('projectId') projectId: string,
+    @Param('taskId') taskId: string,
+    @Param('entryId') entryId: string,
+    @Request() req: any,
+  ): Promise<void> {
+    return this.taskService.deleteTaskCostEntry(
+      projectId,
+      taskId,
+      entryId,
+      req.user.userId,
+    );
   }
 
   @Get('tasks/mine')
@@ -110,9 +178,19 @@ export class TaskController {
   async addAssignee(
     @Param('id') taskId: string,
     @Request() req: any,
-    @Body() body: { userId: string },
+    @Body() body: AddTaskAssigneeRequest,
   ): Promise<TaskDto> {
-    return this.taskService.addAssignee(taskId, req.user.userId, body.userId);
+    return this.taskService.addAssignee(taskId, req.user.userId, body);
+  }
+
+  @Patch('tasks/:id/assignees/:userId')
+  patchAssignee(
+    @Param('id') taskId: string,
+    @Param('userId') userId: string,
+    @Request() req: any,
+    @Body() body: PatchTaskAssigneeRequest,
+  ): Promise<TaskDto> {
+    return this.taskService.patchAssignee(taskId, req.user.userId, userId, body);
   }
 
   @Delete('tasks/:id/assignees/:userId')
@@ -124,6 +202,47 @@ export class TaskController {
     return this.taskService.removeAssignee(taskId, req.user.userId, userId);
   }
 
+  @Post('tasks/:id/generic-resource-assignments')
+  addGenericResourceAssignment(
+    @Param('id') taskId: string,
+    @Request() req: any,
+    @Body() body: AddTaskGenericResourceAssignmentRequest,
+  ): Promise<TaskDto> {
+    return this.taskService.addGenericResourceAssignment(
+      taskId,
+      req.user.userId,
+      body,
+    );
+  }
+
+  @Patch('tasks/:id/generic-resource-assignments/:genericResourceId')
+  patchGenericResourceAssignment(
+    @Param('id') taskId: string,
+    @Param('genericResourceId') genericResourceId: string,
+    @Request() req: any,
+    @Body() body: PatchTaskGenericResourceAssignmentRequest,
+  ): Promise<TaskDto> {
+    return this.taskService.patchGenericResourceAssignment(
+      taskId,
+      req.user.userId,
+      genericResourceId,
+      body,
+    );
+  }
+
+  @Delete('tasks/:id/generic-resource-assignments/:genericResourceId')
+  removeGenericResourceAssignment(
+    @Param('id') taskId: string,
+    @Param('genericResourceId') genericResourceId: string,
+    @Request() req: any,
+  ): Promise<TaskDto> {
+    return this.taskService.removeGenericResourceAssignment(
+      taskId,
+      req.user.userId,
+      genericResourceId,
+    );
+  }
+
   @Post('tasks/:id/dependencies')
   async addDependency(
     @Param('id') taskId: string,
@@ -131,6 +250,16 @@ export class TaskController {
     @Body() body: AddTaskDependencyRequest,
   ): Promise<TaskDto> {
     return this.taskService.addDependency(req.user.userId, taskId, body);
+  }
+
+  @Patch('tasks/:id/dependencies/:blockingTaskId')
+  async updateDependencyLag(
+    @Param('id') taskId: string,
+    @Param('blockingTaskId') blockingTaskId: string,
+    @Request() req: any,
+    @Body() body: UpdateTaskDependencyScheduleRequest,
+  ): Promise<TaskDto> {
+    return this.taskService.updateDependencyLag(req.user.userId, taskId, blockingTaskId, body);
   }
 
   @Delete('tasks/:id/dependencies/:blockingTaskId')

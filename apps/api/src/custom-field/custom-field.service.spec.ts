@@ -1,5 +1,5 @@
 import { Test } from '@nestjs/testing';
-import { AuditEventType } from '@prisma/client';
+import { AuditEventType, CustomFieldComputedKind } from '@prisma/client';
 import { CustomFieldService } from './custom-field.service';
 import { PrismaService } from '../common/prisma.service';
 import { TaskActivityLogService } from '../activity-log/task-activity-log.service';
@@ -12,6 +12,8 @@ describe('CustomFieldService', () => {
       create: jest.fn(),
       findMany: jest.fn(),
       findUnique: jest.fn(),
+      findFirst: jest.fn(),
+      update: jest.fn(),
     },
     customFieldValue: {
       upsert: jest.fn(),
@@ -53,6 +55,7 @@ describe('CustomFieldService', () => {
       type: CustomFieldType.TEXT,
       options: null,
       isRequired: false,
+      computedKind: CustomFieldComputedKind.NONE,
       createdAt: now,
     });
     prisma.projectCustomField.findUnique.mockResolvedValue({
@@ -71,6 +74,7 @@ describe('CustomFieldService', () => {
         type: CustomFieldType.TEXT,
         options: null,
         isRequired: false,
+        computedKind: CustomFieldComputedKind.NONE,
         createdAt: now,
       },
     });
@@ -115,6 +119,7 @@ describe('CustomFieldService', () => {
       type: CustomFieldType.TEXT,
       options: null,
       isRequired: false,
+      computedKind: CustomFieldComputedKind.NONE,
       createdAt: now,
     });
     prisma.projectCustomField.findUnique.mockResolvedValue(null);
@@ -122,6 +127,33 @@ describe('CustomFieldService', () => {
     await expect(
       service.setValue('t1', 'f9', { value: { text: 'x' } }, 'user-1'),
     ).rejects.toThrow(/not enabled on the task project/);
+
+    expect(prisma.customFieldValue.upsert).not.toHaveBeenCalled();
+  });
+
+  it('setValue rejects computed (rollup) fields', async () => {
+    const now = new Date();
+    prisma.task.findUnique.mockResolvedValue({
+      id: 't1',
+      projectId: 'p1',
+      workspaceId: 'ws-1',
+      deletedAt: null,
+      title: 'Task',
+    });
+    prisma.customFieldDefinition.findUnique.mockResolvedValue({
+      id: 'f-roll',
+      workspaceId: 'ws-1',
+      name: 'Total',
+      type: CustomFieldType.NUMBER,
+      options: null,
+      isRequired: false,
+      computedKind: CustomFieldComputedKind.SUBTASK_ROLLUP_NUMBER,
+      createdAt: now,
+    });
+
+    await expect(
+      service.setValue('t1', 'f-roll', { value: { value: 1 } }, 'user-1'),
+    ).rejects.toThrow(/computed/);
 
     expect(prisma.customFieldValue.upsert).not.toHaveBeenCalled();
   });

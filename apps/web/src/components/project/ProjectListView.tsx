@@ -10,11 +10,21 @@ import { useMemo, useState, useRef, useEffect, KeyboardEvent } from 'react';
 import { DndContext, DragOverlay, useDroppable } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { clsx } from 'clsx';
+import type { ListScheduleFilter, ListScheduleSort } from '../../lib/filterSectionsBySchedule';
+import type { TaskScheduleInsight } from '../../lib/taskScheduleInsight';
 
 interface ProjectListViewProps {
   sections: Section[];
   projectId: string;
   onSelectTask: (taskId: string) => void;
+  scheduleWorkspaceId?: string;
+  scheduleFilter?: ListScheduleFilter;
+  scheduleSort?: ListScheduleSort;
+  scheduleLoading?: boolean;
+  scheduleLoadFailed?: boolean;
+  onScheduleFilterChange?: (v: ListScheduleFilter) => void;
+  onScheduleSortChange?: (v: ListScheduleSort) => void;
+  getScheduleInsight?: (task: Task) => TaskScheduleInsight | undefined;
 }
 
 function ListSectionTaskList({
@@ -22,11 +32,13 @@ function ListSectionTaskList({
   taskMap,
   onSelectTask,
   onStatusChange,
+  getScheduleInsight,
 }: {
   section: Section;
   taskMap: Map<string, Task>;
   onSelectTask: (taskId: string) => void;
   onStatusChange: (taskId: string, status: string) => void;
+  getScheduleInsight?: (task: Task) => TaskScheduleInsight | undefined;
 }) {
   const taskIds = useMemo(
     () =>
@@ -55,13 +67,26 @@ function ListSectionTaskList({
           roots={taskIds.map((id) => taskMap.get(id)).filter((t): t is Task => Boolean(t))}
           onSelectTask={onSelectTask}
           onStatusChange={onStatusChange}
+          getScheduleInsight={getScheduleInsight}
         />
       </div>
     </SortableContext>
   );
 }
 
-export function ProjectListView({ sections, projectId, onSelectTask }: ProjectListViewProps) {
+export function ProjectListView({
+  sections,
+  projectId,
+  onSelectTask,
+  scheduleWorkspaceId,
+  scheduleFilter = 'all',
+  scheduleSort = 'none',
+  scheduleLoading = false,
+  scheduleLoadFailed = false,
+  onScheduleFilterChange,
+  onScheduleSortChange,
+  getScheduleInsight,
+}: ProjectListViewProps) {
   const sortedSections = useMemo(
     () => [...sections].sort((a, b) => a.sortOrder - b.sortOrder),
     [sections],
@@ -143,6 +168,48 @@ export function ProjectListView({ sections, projectId, onSelectTask }: ProjectLi
       onDragCancel={handleDragCancel}
     >
       <div className="w-full bg-white">
+        {scheduleWorkspaceId ? (
+          <div className="sticky top-0 z-[11] bg-slate-50/95 border-b border-slate-200 px-4 py-2 flex flex-wrap items-center gap-2 text-xs">
+            <span className="text-slate-600 font-medium mr-1">Schedule</span>
+            <select
+              aria-label="Filter by schedule field"
+              className="border border-slate-200 rounded-md px-2 py-1 bg-white text-slate-800 max-w-[10rem]"
+              value={scheduleFilter}
+              disabled={scheduleLoading}
+              onChange={(e) =>
+                onScheduleFilterChange?.(e.target.value as ListScheduleFilter)
+              }
+            >
+              <option value="all">All tasks</option>
+              <option value="critical">On critical path</option>
+              <option value="slack">With slack (&gt;0)</option>
+              <option value="deadline">Deadline breach</option>
+            </select>
+            <select
+              aria-label="Sort by schedule field"
+              className="border border-slate-200 rounded-md px-2 py-1 bg-white text-slate-800 max-w-[11rem]"
+              value={scheduleSort}
+              disabled={scheduleLoading}
+              onChange={(e) =>
+                onScheduleSortChange?.(e.target.value as ListScheduleSort)
+              }
+            >
+              <option value="none">Order: default</option>
+              <option value="critical_first">Critical first</option>
+              <option value="slack_desc">Most slack first</option>
+              <option value="deadline_breach_first">Deadline issues first</option>
+              <option value="constraint_type">Constraint type</option>
+            </select>
+            {scheduleLoading ? (
+              <span className="text-slate-500">Loading CPM…</span>
+            ) : null}
+            {scheduleLoadFailed ? (
+              <span className="text-amber-800" title="Filters use client data only">
+                Schedule API unavailable
+              </span>
+            ) : null}
+          </div>
+        ) : null}
         <div className="sticky top-0 bg-white border-b border-gray-200 px-4 py-3 flex items-center gap-3 text-sm font-medium text-gray-600 z-10">
           <div className="w-6 flex-shrink-0 flex justify-center" title="Drag to reorder">
             <GripVertical className="w-4 h-4 text-gray-300" aria-hidden />
@@ -177,6 +244,7 @@ export function ProjectListView({ sections, projectId, onSelectTask }: ProjectLi
                 taskMap={taskMap}
                 onSelectTask={onSelectTask}
                 onStatusChange={handleStatusChange}
+                getScheduleInsight={getScheduleInsight}
               />
             )}
 

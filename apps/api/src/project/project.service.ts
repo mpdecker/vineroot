@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import {
   AuditEventType,
+  CustomFieldComputedKind,
   KanbanWipEnforcement,
   Prisma,
   TaskStatus,
@@ -40,18 +41,19 @@ import {
   ProjectWorkloadDto,
 } from '@vineroot/shared-types';
 import { buildProjectCfdSeries } from './project-cfd.util';
+import { buildProjectWorkloadDto, WORKLOAD_TERMINAL } from './project-workload.util';
 import {
-  buildProjectWorkloadDto,
-  enumerateWeekStarts,
-  startOfWeekMonday,
-  WORKLOAD_TERMINAL,
-} from './project-workload.util';
+  buildWorkloadWeekMondayKeys,
+  resolveProjectWorkloadTimeZone,
+} from './project-workload-calendar.util';
+import { CustomFieldRollupService } from '../custom-field/custom-field-rollup.service';
 import {
   calendarDayToIsoKey,
   completedCumulativeThroughDayEnd,
   eachCalendarDayInclusive,
   endOfCalendarDay,
   prismaDateFromIsoKey,
+  resolveSprintReportWindow,
   startOfCalendarDay,
   storyPointsRemainingAtDayEnd,
 } from './project-sprint-metrics.util';
@@ -129,6 +131,7 @@ export class ProjectService {
     private prisma: PrismaService,
     private taskService: TaskService,
     private taskActivityLog: TaskActivityLogService,
+    private customFieldRollupService: CustomFieldRollupService,
   ) {}
 
   private async assertWorkspaceMember(
@@ -290,6 +293,20 @@ export class ProjectService {
       },
       include: projectInclude,
     });
+
+    const defaultCal = await this.prisma.workCalendar.findFirst({
+      where: { workspaceId: { in: unique }, isDefault: true },
+      orderBy: { name: 'asc' },
+    });
+    if (defaultCal) {
+      await this.prisma.project.update({
+        where: { id: project.id },
+        data: { workCalendarId: defaultCal.id },
+      });
+      (project as { workCalendarId?: string | null }).workCalendarId =
+        defaultCal.id;
+    }
+
     await this.hydrateRootTaskCounts([project]);
     return this.toProjectDto(project);
   }
@@ -351,6 +368,7 @@ export class ProjectService {
     });
     if (!project) return null;
     await this.hydrateRootTaskCounts([project]);
+    await this.customFieldRollupService.mergeRollupsIntoProjectTree(id, project);
     return this.toProjectDto(project);
   }
 
@@ -420,12 +438,32 @@ export class ProjectService {
       data.teamId = t;
     }
 
+    if (req.workCalendarId !== undefined) {
+      if (req.workCalendarId === null) {
+        data.workCalendarId = null;
+      } else {
+        const cal = await this.prisma.workCalendar.findFirst({
+          where: {
+            id: req.workCalendarId,
+            workspaceId: { in: effectiveWorkspaceIds },
+          },
+        });
+        if (!cal) {
+          throw new BadRequestException(
+            'Work calendar not found in a workspace linked to this project',
+          );
+        }
+        data.workCalendarId = req.workCalendarId;
+      }
+    }
+
     const project = await this.prisma.project.update({
       where: { id },
       data: data as any,
       include: projectDetailInclude,
     });
     await this.hydrateRootTaskCounts([project]);
+    await this.customFieldRollupService.mergeRollupsIntoProjectTree(id, project);
     return this.toProjectDto(project);
   }
 
@@ -532,6 +570,8 @@ export class ProjectService {
           startDate: source.startDate,
           dueDate: source.dueDate,
           defaultView: source.defaultView,
+          workCalendarId: source.workCalendarId,
+          defaultManualSchedule: source.defaultManualSchedule ?? true,
           members: {
             create: source.members.map((m) => ({
               userId: m.userId,
@@ -627,10 +667,31 @@ export class ProjectService {
             storyPoints: t.storyPoints,
             sprintId: t.sprintId ? sprintIdMap.get(t.sprintId) ?? null : null,
             backlogRank: t.sprintId ? null : t.backlogRank,
+            isMilestone: t.isMilestone ?? false,
+            isManuallyScheduled: t.isManuallyScheduled,
+            constraintType: t.constraintType,
+            constraintDate: t.constraintDate,
+            deadlineDate: t.deadlineDate,
+            durationWorkingMinutes: t.durationWorkingMinutes,
+            workMinutes: t.workMinutes,
+            scheduleMode: t.scheduleMode,
+            workCalendarId: t.workCalendarId,
+            effortDriven: t.effortDriven ?? false,
+            isSummaryRollup: t.isSummaryRollup ?? false,
+            percentComplete: t.percentComplete,
+            fixedCost: t.fixedCost,
+            actualCost: t.actualCost,
+            overtimeWorkMinutes: t.overtimeWorkMinutes ?? undefined,
+            isBudgetTask: t.isBudgetTask ?? false,
             assignees:
               t.assignees.length > 0
                 ? {
-                    create: t.assignees.map((a) => ({ userId: a.userId })),
+                    create: t.assignees.map((a) => ({
+                      userId: a.userId,
+                      unitsPercent: a.unitsPercent ?? 100,
+                      ...(a.workMinutes != null ? { workMinutes: a.workMinutes } : {}),
+                      ...(a.costPerUse != null ? { costPerUse: a.costPerUse } : {}),
+                    })),
                   }
                 : undefined,
             tags:
@@ -674,6 +735,10 @@ export class ProjectService {
       throw new NotFoundException('Duplicated project not found');
     }
     await this.hydrateRootTaskCounts([full]);
+    await this.customFieldRollupService.mergeRollupsIntoProjectTree(
+      newProjectId,
+      full,
+    );
     await this.taskActivityLog.log({
       actorId: userId,
       taskId: null,
@@ -796,8 +861,15 @@ export class ProjectService {
     type: string;
     options: unknown;
     isRequired: boolean;
+    description?: string | null;
+    defaultValue?: unknown;
+    computedKind?: CustomFieldComputedKind;
+    rollupSourceFieldId?: string | null;
+    rollupAggregation?: string | null;
     createdAt: Date;
   }): CustomFieldDefinitionDto {
+    const computedKind =
+      field.computedKind ?? CustomFieldComputedKind.NONE;
     return {
       id: field.id,
       workspaceId: field.workspaceId,
@@ -805,6 +877,14 @@ export class ProjectService {
       type: field.type as CustomFieldDefinitionDto['type'],
       options: field.options as Record<string, any> | undefined,
       isRequired: field.isRequired,
+      description: field.description ?? undefined,
+      defaultValue: field.defaultValue as Record<string, any> | undefined,
+      computedKind,
+      rollupSourceFieldId: field.rollupSourceFieldId ?? undefined,
+      rollupAggregation: field.rollupAggregation as
+        | CustomFieldDefinitionDto['rollupAggregation']
+        | undefined,
+      isComputed: computedKind !== CustomFieldComputedKind.NONE,
       createdAt: field.createdAt,
     };
   }
@@ -849,6 +929,8 @@ export class ProjectService {
       dueDate: project.dueDate,
       defaultView: project.defaultView,
       kanbanWipEnforcement: project.kanbanWipEnforcement ?? 'OFF',
+      workCalendarId: project.workCalendarId ?? null,
+      defaultManualSchedule: project.defaultManualSchedule ?? true,
       createdAt: project.createdAt,
       updatedAt: project.updatedAt,
       sectionCount: project.sections?.length || 0,
@@ -997,11 +1079,14 @@ export class ProjectService {
   /**
    * Burndown from tasks currently in the sprint + DONE completedAt (or updatedAt).
    * Does not use historical snapshots; scope changes if tasks move sprints.
+   * Optional `from` / `to` (YYYY-MM-DD) restrict returned days to the intersection with the sprint (ideal line uses full-sprint indices).
    */
   async getSprintBurndown(
     projectId: string,
     sprintId: string,
     userId: string,
+    fromStr?: string,
+    toStr?: string,
   ): Promise<SprintBurndownDto> {
     await this.assertProjectAccess(projectId, userId);
     const sprint = await this.prisma.sprint.findFirst({
@@ -1010,6 +1095,23 @@ export class ProjectService {
     if (!sprint) {
       throw new NotFoundException('Sprint not found');
     }
+
+    const win = resolveSprintReportWindow(
+      sprint.startDate,
+      sprint.endDate,
+      fromStr,
+      toStr,
+    );
+    if (win.ok === false) {
+      if (win.code === 'INVALID_DATE') {
+        throw new BadRequestException('Invalid from or to date');
+      }
+      if (win.code === 'FROM_AFTER_TO') {
+        throw new BadRequestException('from must be on or before to');
+      }
+      throw new BadRequestException('Date window does not overlap the sprint');
+    }
+    const { windowStart, windowEnd } = win;
 
     const tasks = await this.prisma.task.findMany({
       where: {
@@ -1030,8 +1132,16 @@ export class ProjectService {
       .filter((t) => t.status !== TaskStatus.CANCELLED)
       .reduce((s, t) => s + (t.storyPoints ?? 0), 0);
 
-    const dayStarts = eachCalendarDayInclusive(sprint.startDate, sprint.endDate);
-    const n = dayStarts.length;
+    const allSprintDays = eachCalendarDayInclusive(
+      sprint.startDate,
+      sprint.endDate,
+    );
+    const n = allSprintDays.length;
+    const idxByKey = new Map(
+      allSprintDays.map((d, i) => [calendarDayToIsoKey(d), i]),
+    );
+
+    const dayStarts = eachCalendarDayInclusive(windowStart, windowEnd);
     const firstKey = calendarDayToIsoKey(dayStarts[0]);
     const lastKey = calendarDayToIsoKey(dayStarts[dayStarts.length - 1]);
     const metricSnaps = await this.prisma.sprintMetricSnapshot.findMany({
@@ -1047,8 +1157,12 @@ export class ProjectService {
       metricSnaps.map((s) => [calendarDayToIsoKey(new Date(s.day)), s]),
     );
 
-    const days = dayStarts.map((day, i) => {
+    const days = dayStarts.map((day) => {
       const key = calendarDayToIsoKey(day);
+      const i = idxByKey.get(key);
+      if (i === undefined) {
+        throw new Error(`Burndown window day ${key} outside sprint calendar`);
+      }
       const snap = snapByKey.get(key);
       const dayEnd = endOfCalendarDay(day);
       if (snap) {
@@ -1422,20 +1536,15 @@ export class ProjectService {
       ? Math.min(26, Math.max(4, weekCountParsed))
       : 12;
 
-    let rangeStart: Date;
     if (fromStr) {
       const d = new Date(fromStr);
       if (Number.isNaN(d.getTime())) {
         throw new BadRequestException('Invalid from date');
       }
-      rangeStart = startOfWeekMonday(startOfCalendarDay(d));
-    } else {
-      const t = startOfCalendarDay(new Date());
-      rangeStart = startOfWeekMonday(t);
-      rangeStart.setDate(rangeStart.getDate() - 28);
     }
 
-    const weekStarts = enumerateWeekStarts(rangeStart, weekCount);
+    const workloadTz = await resolveProjectWorkloadTimeZone(this.prisma, projectId);
+    const weekMondayKeys = buildWorkloadWeekMondayKeys(fromStr, workloadTz, weekCount);
 
     const where: Prisma.TaskWhereInput = {
       projectId,
@@ -1460,12 +1569,16 @@ export class ProjectService {
         startDate: true,
         dueDate: true,
         assignees: {
-          include: { user: { select: { displayName: true } } },
+          select: {
+            userId: true,
+            unitsPercent: true,
+            user: { select: { displayName: true } },
+          },
         },
       },
     });
 
-    return buildProjectWorkloadDto(projectId, weekStarts, tasks);
+    return buildProjectWorkloadDto(projectId, weekMondayKeys, tasks, workloadTz);
   }
 
   private static readonly SAVED_VIEW_NAME_MAX = 120;
@@ -1502,7 +1615,9 @@ export class ProjectService {
       o.surface === 'burndown' ||
       o.surface === 'flow' ||
       o.surface === 'workload' ||
-      o.surface === 'activity'
+      o.surface === 'activity' ||
+      o.surface === 'timephased' ||
+      o.surface === 'network'
     ) {
       out.surface = o.surface;
     }
@@ -1521,6 +1636,37 @@ export class ProjectService {
     const wf = o.workloadFrom;
     if (typeof wf === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(wf.trim())) {
       out.workloadFrom = wf.trim();
+    }
+    const lsf = o.listScheduleFilter;
+    if (
+      lsf === 'all' ||
+      lsf === 'critical' ||
+      lsf === 'slack' ||
+      lsf === 'deadline'
+    ) {
+      out.listScheduleFilter = lsf;
+    }
+    const lss = o.listScheduleSort;
+    if (
+      lss === 'none' ||
+      lss === 'critical_first' ||
+      lss === 'slack_desc' ||
+      lss === 'deadline_breach_first' ||
+      lss === 'constraint_type'
+    ) {
+      out.listScheduleSort = lss;
+    }
+    const tg = o.timephasedGranularity;
+    if (tg === 'week' || tg === 'day') {
+      out.timephasedGranularity = tg;
+    }
+    const tb = o.timephasedBasis;
+    if (tb === 'calendar' || tb === 'working') {
+      out.timephasedBasis = tb;
+    }
+    const tgm = o.timephasedGridMode;
+    if (tgm === 'list' || tgm === 'task_usage' || tgm === 'resource_usage') {
+      out.timephasedGridMode = tgm;
     }
     return out;
   }

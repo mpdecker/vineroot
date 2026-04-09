@@ -1,5 +1,4 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Cron, CronExpression } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../common/prisma.service';
 import { AttachmentStorageRouter } from './attachment-storage.router';
@@ -18,7 +17,6 @@ export class AttachmentRetentionService {
     private storage: AttachmentStorageRouter,
   ) {}
 
-  @Cron(CronExpression.EVERY_DAY_AT_3AM)
   async purgeExpiredLocalFiles(): Promise<void> {
     const raw = this.config.get<string>('ATTACHMENT_RETENTION_DAYS') ?? '0';
     const days = parseInt(raw, 10);

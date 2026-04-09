@@ -150,11 +150,15 @@ export class ProjectResourceController {
     @Param('projectId') projectId: string,
     @Param('sprintId') sprintId: string,
     @Request() req: any,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
   ): Promise<SprintBurndownDto> {
     return this.projectService.getSprintBurndown(
       projectId,
       sprintId,
       req.user.userId,
+      from,
+      to,
     );
   }
 

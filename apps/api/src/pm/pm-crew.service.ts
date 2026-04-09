@@ -1,5 +1,4 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Cron, CronExpression } from '@nestjs/schedule';
 import { Prisma } from '@prisma/client';
 import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import { PrismaService } from '../common/prisma.service';
@@ -19,8 +18,7 @@ export class PmCrewService {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  /** Every 5 minutes: stuck human gates (>2h), timeout hints, large unblock alerts */
-  @Cron('*/5 * * * *')
+  /** Stuck human gates (>2h), timeout hints, large unblock alerts — schedule via CRON_PM_CREW_HEARTBEAT */
   async heartbeat(): Promise<void> {
     if (process.env.PM_CREW_ENABLED !== 'true') {
       return;
@@ -129,8 +127,7 @@ export class PmCrewService {
     }
   }
 
-  /** Hourly narrative placeholder — extend with LLM / gemma when available */
-  @Cron(CronExpression.EVERY_HOUR)
+  /** Narrative placeholder — extend with LLM / gemma when available; schedule via CRON_PM_CREW_PROGRESS */
   async progressReport(): Promise<void> {
     if (process.env.PM_CREW_ENABLED !== 'true') {
       return;

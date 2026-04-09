@@ -19,7 +19,18 @@ describe('WorkspaceService', () => {
     service = new WorkspaceService(prisma as any);
   });
 
-  const memberUser = { id: 'u1', email: 'a@b.com', displayName: 'A', passwordHash: 'x', createdAt: new Date(), updatedAt: new Date() };
+  const memberUser = {
+    id: 'u1',
+    email: 'a@b.com',
+    displayName: 'A',
+    passwordHash: 'secret-hash',
+    avatarUrl: null,
+    isAgent: false,
+    agentTier: null,
+    timezone: 'UTC',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
 
   const workspaceRow = {
     id: 'ws1',
@@ -27,14 +38,17 @@ describe('WorkspaceService', () => {
     slug: 'w-abc',
     description: null,
     logoUrl: null,
+    slackIncomingWebhookUrl: null,
     deletedAt: null,
     createdAt: new Date(),
     updatedAt: new Date(),
     members: [
       {
+        id: 'wm1',
         workspaceId: 'ws1',
         userId: 'u1',
         role: 'OWNER',
+        joinedAt: new Date(),
         user: memberUser,
       },
     ],
@@ -69,4 +83,15 @@ describe('WorkspaceService', () => {
       service.inviteMember('ws1', { email: 'missing@x.com', role: 'MEMBER' }),
     ).rejects.toThrow('User not found');
   });
+
+  it('findById maps member users without password hash', async () => {
+    prisma.workspace.findUnique.mockResolvedValue(workspaceRow);
+
+    const dto = await service.findById('ws1');
+
+    expect(dto?.members?.[0].user).not.toHaveProperty('passwordHash');
+    expect(dto?.members?.[0].user.email).toBe('a@b.com');
+    expect(dto?.members?.[0].user.displayName).toBe('A');
+  });
 });
+
