@@ -1,6 +1,22 @@
 # Vineroot
 
-**Vineroot** is a full-featured project management platform — Asana-parity from day one, with deep LLM-agent integration built into its core data model. It serves as both a human-facing PM tool and a routing/assignment hub for AI agents operating across the ModelT agentic software factory.
+> ## ⚠️ Deprecated — removed from the active portfolio band
+>
+> Vineroot is no longer actively developed (deprecated 1 July 2026,
+> `chore: deprecate Vineroot and remove from active portfolio band`). The code
+> is preserved for reference; do not build new work on it.
+>
+> **Note on branches:** the deprecation lives only on
+> `deprecate/remove-from-band`. It was never merged, so `origin/main` still
+> points at the April 2026 tip (`CPM function added, refactor to a new thing in
+> a new iteration`) and reads as if the project were active. Treat this branch
+> as the accurate record.
+
+**Vineroot** was a full-featured project management platform — Asana-parity from
+day one, with deep LLM-agent integration built into its core data model. It was
+intended to serve as both a human-facing PM tool and a routing/assignment hub for
+AI agents operating across the ModelT agentic software factory (the `modelT`
+system, which lives under `C:\Development\modelT`).
 
 ---
 
